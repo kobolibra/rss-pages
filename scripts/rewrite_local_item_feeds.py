@@ -11,6 +11,12 @@ CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
 ET.register_namespace("content", CONTENT_NS)
 
 
+
+
+def stable_guid_hash(link: str, title: str) -> str:
+    base = f"{link}|{title}"
+    return hashlib.md5(base.encode("utf-8")).hexdigest()
+
 def slugify_from_link_or_title(link: str, title: str) -> str:
     if link:
         parsed = urlparse(link)
@@ -114,14 +120,25 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
             encoding="utf-8",
         )
 
+        item_link = local_url
+        item_guid = local_url
+        item_desc = desc
+
+        # BlackRock 尽量复刻服务器版字段：外部 link + hash guid + 短 description + 完整 content:encoded
+        if feed_name == "blackrock_weekly_commentary":
+            source_link = link or local_url
+            item_link = source_link
+            item_guid = stable_guid_hash(source_link, title)
+            item_desc = desc
+
         items.append(
             {
                 "title": title,
-                "link": local_url,
-                "guid": local_url,
+                "link": item_link,
+                "guid": item_guid,
                 "pub_date": pub_date,
                 "author": author,
-                "description": desc,
+                "description": item_desc,
                 "content_html": content_html,
             }
         )
@@ -141,7 +158,10 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         ET.SubElement(it, "title").text = item["title"]
         ET.SubElement(it, "link").text = item["link"]
         guid_el = ET.SubElement(it, "guid")
-        guid_el.set("isPermaLink", "true")
+        if feed_name == "blackrock_weekly_commentary":
+            guid_el.set("isPermaLink", "false")
+        else:
+            guid_el.set("isPermaLink", "true")
         guid_el.text = item["guid"]
         if item["pub_date"]:
             ET.SubElement(it, "pubDate").text = item["pub_date"]
