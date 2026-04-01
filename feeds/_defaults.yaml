@@ -2,7 +2,7 @@ source:
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
   cloudflare:
-    enabled: true
+    enabled: false
     fallback: true
 
 settings:
