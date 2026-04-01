@@ -56,7 +56,17 @@ def get_text(el, tag: str) -> str:
 
 def get_content_encoded(el) -> str:
     node = el.find(qname_local("encoded"))
-    return (node.text or "").strip() if node is not None and node.text else ""
+    if node is None:
+        return ""
+    # content:encoded 里可能是真正的嵌套 HTML，而不只是纯文本；不能只取 node.text
+    parts = []
+    if node.text and node.text.strip():
+        parts.append(node.text)
+    for child in list(node):
+        parts.append(ET.tostring(child, encoding="unicode", method="xml"))
+        if child.tail and child.tail.strip():
+            parts.append(child.tail)
+    return "".join(parts).strip()
 
 
 def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: str):
