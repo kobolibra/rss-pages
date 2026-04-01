@@ -1,0 +1,17 @@
+source:
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  cloudflare:
+    enabled: true
+    fallback: true
+
+settings:
+  max_items: 200
+  dedup: true
+
+# Credentials are read from environment:
+# export CLOUDFLARE_ACCOUNT_ID=...
+# export CLOUDFLARE_API_TOKEN=...
+
+output:
+  language: "en"

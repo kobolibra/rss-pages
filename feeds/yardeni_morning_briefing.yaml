@@ -1,0 +1,18 @@
+name: "yardeni_morning_briefing"
+version: "1.0"
+source:
+  url: "https://yardeni.com/morning-briefing/"
+
+output:
+  channel:
+    title: "Yardeni Morning Briefing"
+    link: "https://yardeni.com/morning-briefing/"
+    description: "Yardeni Morning Briefing RSS generated from the listing page"
+  item: {}
+
+settings:
+  max_items: 30
+  dedup: true
+  parse_mode: "yardeni_morning_briefing"
+
+output_file: "yardeni_morning_briefing.xml"

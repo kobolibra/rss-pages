@@ -1,0 +1,30 @@
+name: "pitchbook_reports"
+version: "1.0"
+source:
+  url: "https://pitchbook.com/news/reports"
+
+# 只抓图文卡片 + 6 条真实文章项
+# 标题优先匹配 image alt 中的首段文本，确保像 Global Distressed Credit Weekly Wrap 这种是第一条
+# 最后一条 Q1 Evergreen 也保留
+extraction:
+  pattern: '^\s*\*\s+\[!\[[^\]]+\]\([^\)]*\)\s+Research\s+###\s+(.+?)\s+The\s+[^\]]*\]\((https://pitchbook\.com/news/reports/[^\)]+)\)'
+  link_group: 2
+  link_filter: '^https://pitchbook\.com/news/reports/'
+
+output:
+  channel:
+    title: "PitchBook Reports"
+    link: "https://pitchbook.com/news/reports"
+    description: "PitchBook Research Reports RSS generated from web page"
+    language: "en"
+  item:
+    title: "{0}"
+    link: "{1}"
+
+settings:
+  max_items: 200
+  dedup: true
+  cache_ttl: 3600
+  parse_mode: "pitchbook_short_title"
+
+output_file: "pitchbook_reports.xml"

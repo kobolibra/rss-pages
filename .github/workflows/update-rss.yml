@@ -1,0 +1,88 @@
+name: Update RSS Feeds
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyyaml feedparser
+
+      - name: Prepare dirs
+        run: |
+          mkdir -p site output
+
+      - name: Mirror RSS feeds
+        run: |
+          python scripts/mirror_feeds.py
+        env:
+          OUT_DIR: site
+
+      - name: Build WebToRSS feeds
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          export WEB_TO_RSS_PUBLIC_BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python web_to_rss.py -c feeds/blackrock_weekly_commentary.yaml -f -o blackrock_weekly_commentary.xml
+          python web_to_rss.py -c feeds/carlyle_insights.yaml -f -o carlyle_insights.xml
+          python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml
+          python web_to_rss.py -c feeds/yardeni_morning_briefing.yaml -f -o yardeni_morning_briefing.xml
+
+      - name: Copy generated XML to site
+        run: |
+          cp output/*.xml site/
+
+      - name: Build Yardeni static item pages
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          python scripts/build_yardeni_static_pages.py output/yardeni_morning_briefing_items.json site "https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+
+      - name: Add index page
+        run: |
+          cat > site/index.html <<'EOF'
+          <html>
+          <body>
+            <h1>RSS Feeds</h1>
+            <ul>
+              <li><a href="pantheonmacro.xml">pantheonmacro</a></li>
+              <li><a href="trivium_finance_regs.xml">Trivium Finance Regs</a></li>
+              <li><a href="blackrock_weekly_commentary_diffbot.xml">BlackRock Weekly Commentary Diffbot</a></li>
+              <li><a href="barclays_weekly_insights.xml">Barclays Weekly Insights</a></li>
+              <li><a href="blackrock_weekly_commentary.xml">blackrock_weekly_commentary</a></li>
+              <li><a href="carlyle_insights.xml">carlyle_insights</a></li>
+              <li><a href="pitchbook_reports.xml">pitchbook_reports</a></li>
+              <li><a href="yardeni_morning_briefing.xml">yardeni_morning_briefing</a></li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

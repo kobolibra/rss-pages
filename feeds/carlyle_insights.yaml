@@ -1,0 +1,24 @@
+name: "carlyle_insights"
+version: "1.0"
+source:
+  url: "https://www.carlyle.com/global-insights"
+
+extraction:
+  pattern: '^##\s*\[([^\]]+)\]\(([^)]+)\)'
+  link_group: 2
+  link_filter: '^https://www\.carlyle\.com/'
+
+output:
+  channel:
+    title: "Carlyle Global Insights"
+    link: "https://www.carlyle.com/global-insights"
+    description: "Carlyle Global Insights RSS - 自动转换"
+  item:
+    title: "{0}"
+    link: "{1}"
+
+settings:
+  max_items: 20
+  dedup: true
+
+output_file: "carlyle_insights.xml"
