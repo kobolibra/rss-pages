@@ -30,7 +30,7 @@ jobs:
 
       - name: Prepare dirs
         run: |
-          mkdir -p site output
+          mkdir -p site feeds/output
 
       - name: Mirror RSS feeds
         run: |
@@ -49,12 +49,12 @@ jobs:
 
       - name: Copy generated XML to site
         run: |
-          cp output/*.xml site/
+          cp feeds/output/*.xml site/
 
       - name: Build Yardeni static item pages
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          python scripts/build_yardeni_static_pages.py output/yardeni_morning_briefing_items.json site "https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python scripts/build_yardeni_static_pages.py feeds/output/yardeni_morning_briefing_items.json site "https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
       - name: Add index page
         run: |
