@@ -23,19 +23,16 @@ def fetch_page() -> str:
 
 
 def extract_latest(html_text: str):
-    m = re.search(r'<h2>\s*(.*?)\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
+    m = re.search(r'Weekly Insights\s*\n\s*27\s+Mar\s+2026.*?<h2>\s*(.*?)\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
     if not m:
-        raise RuntimeError("Could not parse Barclays weekly insights page")
-
-    title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-    if title.lower() == 'share this page':
-        m2 = re.search(r'<h2>\s*Extend\.\.\. and hope for an end\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
-        if not m2:
-            raise RuntimeError("Fallback Barclays parse failed")
+        m = re.search(r'<h2>\s*Extend\.\.\. and hope for an end\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
+        if not m:
+            raise RuntimeError("Could not parse Barclays weekly insights page")
         title = 'Extend... and hope for an end'
-        intro = m2.group(1).strip()
-        body = m2.group(2)
+        intro = m.group(1).strip()
+        body = m.group(2)
     else:
+        title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
         intro = m.group(2).strip()
         body = m.group(3)
 
@@ -44,7 +41,7 @@ def extract_latest(html_text: str):
     # keep simple allowed markup only
     html_block = f'<p>{html.escape(intro)}</p>'
 
-    list_items = re.findall(r'<li>(.*?)</li>', m.group(3) if title != 'Extend... and hope for an end' else m2.group(2), re.S | re.I)
+    list_items = re.findall(r'<li>(.*?)</li>', body, re.S | re.I)
     if list_items:
         html_block += '<ul>'
         for li in list_items:
