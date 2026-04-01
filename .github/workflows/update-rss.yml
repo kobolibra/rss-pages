@@ -44,10 +44,14 @@ jobs:
       - name: Build WebToRSS feeds
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          export WEB_TO_RSS_PUBLIC_BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          export WEB_TO_RSS_PUBLIC_BASE="$BASE_URL"
           python web_to_rss.py -c feeds/blackrock_weekly_commentary.yaml -f -o blackrock_weekly_commentary.xml
           python web_to_rss.py -c feeds/carlyle_insights.yaml -f -o carlyle_insights.xml
-          python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml
+          if ! python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml; then
+            echo "PitchBook build failed; restoring previously published copy"
+            python scripts/restore_live_pages_feed.py "$BASE_URL" site "pitchbook_reports"
+          fi
           python web_to_rss.py -c feeds/yardeni_morning_briefing.yaml -f -o yardeni_morning_briefing.xml
 
       - name: Copy generated XML to site
