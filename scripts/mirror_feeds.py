@@ -18,7 +18,10 @@ HEADERS = {
 
 for filename, url in FEEDS.items():
     print(f"Fetching {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    (OUT_DIR / filename).write_bytes(r.content)
-    print(f"Saved {filename}")
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        (OUT_DIR / filename).write_bytes(r.content)
+        print(f"Saved {filename}")
+    except Exception as e:
+        print(f"WARN: failed to fetch {url}: {e}")
