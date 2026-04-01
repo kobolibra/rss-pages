@@ -85,7 +85,7 @@ def build_item_page(title: str, content_html: str) -> str:
 <head><title>{html.escape(title)}</title></head>
 <body>
   <h1>{html.escape(title)}</h1>
-  <p><a href=\"{URL}\" target=\"_blank\">原文链接</a></p>
+  <p>来源：{html.escape(URL)}</p>
   <div>{content_html}</div>
 </body>
 </html>
