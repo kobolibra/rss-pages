@@ -49,6 +49,15 @@ def qname_local(tag: str) -> str:
     return f"{{{CONTENT_NS}}}{tag}"
 
 
+def html_to_text(value: str) -> str:
+    if not value:
+        return ""
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
 def get_text(el, tag: str) -> str:
     node = el.find(tag)
     return (node.text or "").strip() if node is not None and node.text else ""
@@ -78,7 +87,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
 
     channel_title = get_text(channel, "title")
     channel_link = get_text(channel, "link")
-    channel_link = f"{public_base.rstrip('/')}\/{feed_name}.xml"
+    channel_link = f"{public_base.rstrip('/')}/{feed_name}.xml"
     channel_desc = get_text(channel, "description")
     channel_lang = get_text(channel, "language") or "en"
     channel_build = get_text(channel, "lastBuildDate") or get_text(channel, "pubDate")
@@ -92,6 +101,9 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         pub_date = get_text(item, "pubDate")
         author = get_text(item, "author")
         content_html = get_content_encoded(item) or desc
+        full_text = html_to_text(content_html)
+        if len(full_text) > len(desc or ""):
+            desc = full_text
         slug = slugify_from_link_or_title(link or guid, title)
         local_url = f"{public_base.rstrip('/')}/item/{feed_name}/{slug}/"
 
