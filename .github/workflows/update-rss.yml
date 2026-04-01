@@ -54,10 +54,17 @@ jobs:
         run: |
           cp feeds/output/*.xml site/
 
-      - name: Build Yardeni static item pages
+      - name: Rewrite local item feeds for readers
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          python scripts/build_yardeni_static_pages.py feeds/output/yardeni_morning_briefing_items.json site "https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "yardeni_morning_briefing,blackrock_weekly_commentary"
+
+      - name: Rebuild Barclays as local-item feed
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python scripts/build_barclays_feed.py site "$BASE_URL"
 
       - name: Add index page
         run: |

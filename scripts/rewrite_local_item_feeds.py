@@ -1,0 +1,145 @@
+import hashlib
+import html
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+from xml.dom import minidom
+from xml.etree import ElementTree as ET
+
+CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
+ET.register_namespace("content", CONTENT_NS)
+
+
+def slugify_from_link_or_title(link: str, title: str) -> str:
+    if link:
+        parsed = urlparse(link)
+        path = (parsed.path or "").strip("/")
+        if path:
+            last = path.split("/")[-1]
+            if last and "." not in last:
+                return last
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", title).strip("-").lower()
+    return slug or hashlib.md5((link + title).encode("utf-8")).hexdigest()[:12]
+
+
+def build_page(title: str, body_html: str, source_link: str) -> str:
+    source_html = (
+        f'<p><a href="{html.escape(source_link)}" target="_blank">原文链接</a></p>'
+        if source_link
+        else ""
+    )
+    return f"""<!doctype html>
+<html>
+<meta charset="utf-8">
+<head>
+  <title>{html.escape(title)}</title>
+</head>
+<body>
+  <h1>{html.escape(title)}</h1>
+  {source_html}
+  <div>{body_html}</div>
+</body>
+</html>
+"""
+
+
+def qname_local(tag: str) -> str:
+    return f"{{{CONTENT_NS}}}{tag}"
+
+
+def get_text(el, tag: str) -> str:
+    node = el.find(tag)
+    return (node.text or "").strip() if node is not None and node.text else ""
+
+
+def get_content_encoded(el) -> str:
+    node = el.find(qname_local("encoded"))
+    return (node.text or "").strip() if node is not None and node.text else ""
+
+
+def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: str):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    channel = root.find("channel")
+    if channel is None:
+        raise RuntimeError(f"No channel in {xml_path}")
+
+    channel_title = get_text(channel, "title")
+    channel_link = get_text(channel, "link")
+    channel_desc = get_text(channel, "description")
+    channel_lang = get_text(channel, "language") or "en"
+    channel_build = get_text(channel, "lastBuildDate") or get_text(channel, "pubDate")
+
+    items = []
+    for item in channel.findall("item"):
+        title = get_text(item, "title")
+        link = get_text(item, "link")
+        desc = get_text(item, "description")
+        guid = get_text(item, "guid")
+        pub_date = get_text(item, "pubDate")
+        author = get_text(item, "author")
+        content_html = get_content_encoded(item) or desc
+        slug = slugify_from_link_or_title(link or guid, title)
+        local_url = f"{public_base.rstrip('/')}/item/{feed_name}/{slug}/"
+
+        out_dir = site_dir / "item" / feed_name / slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "index.html").write_text(
+            build_page(title, content_html or html.escape(desc), link),
+            encoding="utf-8",
+        )
+
+        items.append(
+            {
+                "title": title,
+                "link": local_url,
+                "guid": local_url,
+                "pub_date": pub_date,
+                "author": author,
+                "description": desc,
+                "content_html": content_html,
+            }
+        )
+
+    rss = ET.Element("rss", version="2.0")
+    ch = ET.SubElement(rss, "channel")
+    ET.SubElement(ch, "title").text = channel_title
+    ET.SubElement(ch, "link").text = channel_link
+    ET.SubElement(ch, "description").text = channel_desc
+    ET.SubElement(ch, "language").text = channel_lang
+    if channel_build:
+        ET.SubElement(ch, "lastBuildDate").text = channel_build
+    ET.SubElement(ch, "generator").text = "GitHub Pages RSS rewrite"
+
+    for item in items:
+        it = ET.SubElement(ch, "item")
+        ET.SubElement(it, "title").text = item["title"]
+        ET.SubElement(it, "link").text = item["link"]
+        guid_el = ET.SubElement(it, "guid")
+        guid_el.set("isPermaLink", "true")
+        guid_el.text = item["guid"]
+        if item["pub_date"]:
+            ET.SubElement(it, "pubDate").text = item["pub_date"]
+        if item["author"]:
+            ET.SubElement(it, "author").text = item["author"]
+        if item["description"]:
+            ET.SubElement(it, "description").text = item["description"]
+        if item["content_html"]:
+            ET.SubElement(it, qname_local("encoded")).text = item["content_html"]
+
+    pretty = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
+    xml_path.write_bytes(pretty)
+    print(f"rewritten: {xml_path}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Usage: python rewrite_local_item_feeds.py <site_dir> <public_base> <feed1,feed2,...>")
+        sys.exit(1)
+
+    site_dir = Path(sys.argv[1])
+    public_base = sys.argv[2]
+    feed_names = [x.strip() for x in sys.argv[3].split(",") if x.strip()]
+    for feed_name in feed_names:
+        rewrite_feed(site_dir / f"{feed_name}.xml", site_dir, public_base, feed_name)
