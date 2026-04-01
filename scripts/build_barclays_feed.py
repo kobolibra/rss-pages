@@ -57,7 +57,7 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     rss = Element('rss', version='2.0')
     channel = SubElement(rss, 'channel')
     SubElement(channel, 'title').text = TITLE
-    SubElement(channel, 'link').text = URL
+    SubElement(channel, 'link').text = public_base.rstrip('/') + '/barclays_weekly_insights.xml'
     SubElement(channel, 'description').text = DESCRIPTION
     SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'

@@ -78,6 +78,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
 
     channel_title = get_text(channel, "title")
     channel_link = get_text(channel, "link")
+    channel_link = f"{public_base.rstrip('/')}\/{feed_name}.xml"
     channel_desc = get_text(channel, "description")
     channel_lang = get_text(channel, "language") or "en"
     channel_build = get_text(channel, "lastBuildDate") or get_text(channel, "pubDate")
