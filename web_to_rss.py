@@ -304,18 +304,57 @@ class WebToRSS:
     def _extract_blackrock_weekly(self, html_text: str) -> Dict[str, str]:
         raw = self._normalize_text(html_text)
 
-        m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
-        m_title = re.search(r'\n([A-Z][^\n]{8,120})\n\n(?:To view this video|Transcript|Weekly video_)', raw)
+        m_video_date = re.search(r'Weekly video_(\d{8})', raw)
+        video_compact = m_video_date.group(1) if m_video_date else ''
+
+        m_title = re.search(r'Title slide:\s*([^\n]+)', raw)
         if not m_title:
-            m_title = re.search(r'Title slide:\s*([^\n]+)', raw)
-        m_pdf = re.search(r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\s)\]]+\.pdf', raw)
+            m_title = re.search(r'\n([A-Z][^\n]{8,120})\n\n(?:To view this video|Transcript|Weekly video_)', raw)
 
-        date_str = m_date.group(1).strip() if m_date else ''
         title = m_title.group(1).strip() if m_title else ''
-        pdf_link = m_pdf.group(0).strip() if m_pdf else self.config['source']['url']
-
+        title = re.sub(r'[*_\s]+$', '', title).strip()
         if not title:
             raise ValueError('blackrock_weekly title not found')
+
+        pdf_link = ''
+        if video_compact:
+            exact_pdf = re.search(
+                rf'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^)]+\.pdf)\)',
+                raw,
+            )
+            if exact_pdf:
+                pdf_link = exact_pdf.group(1).strip()
+            else:
+                exact_pdf = re.search(
+                    rf'(https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^\s)\]]+\.pdf)',
+                    raw,
+                )
+                if exact_pdf:
+                    pdf_link = exact_pdf.group(1).strip()
+
+        if not pdf_link:
+            m_pdf = re.search(r'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^)]+\.pdf)\)', raw)
+            if not m_pdf:
+                m_pdf = re.search(r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\s)\]]+\.pdf', raw)
+            pdf_link = (m_pdf.group(1) if m_pdf and m_pdf.lastindex else m_pdf.group(0)).strip() if m_pdf else self.config['source']['url']
+
+        date_str = ''
+        if video_compact:
+            try:
+                date_str = datetime.strptime(video_compact, '%Y%m%d').strftime('%b %d, %Y')
+            except Exception:
+                date_str = ''
+        if not date_str:
+            m_pdf_date = re.search(r'weekly-investment-commentary-en-us-(\d{8})-', pdf_link)
+            compact = m_pdf_date.group(1) if m_pdf_date else ''
+            if compact:
+                try:
+                    date_str = datetime.strptime(compact, '%Y%m%d').strftime('%b %d, %Y')
+                except Exception:
+                    date_str = ''
+        if not date_str:
+            m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
+            date_str = m_date.group(1).strip() if m_date else ''
 
         lines = [ln.strip() for ln in raw.splitlines()]
         lines = [ln for ln in lines if ln]
@@ -441,6 +480,12 @@ class WebToRSS:
             raise ValueError('blackrock_weekly content empty')
 
         content_html = ''.join(render_line(x) for x in content_lines)
+        if pdf_link:
+            content_html = re.sub(
+                r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\"\s<]+\.pdf',
+                pdf_link,
+                content_html,
+            )
         guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
         return {
             'title': title,
@@ -577,6 +622,65 @@ class WebToRSS:
         )
         return builder.to_xml()
 
+    def _extract_pitchbook_report_blocks(self, markdown_text: str) -> List[Dict[str, str]]:
+        blocks = re.findall(
+            r'^\*\s+\[(.*?)\]\((https://pitchbook\.com/news/reports/[^)]+)\)',
+            markdown_text,
+            re.M,
+        )
+
+        items: List[Dict[str, str]] = []
+        seen = set()
+        stop_titles = {
+            'Private Market Benchmarks Reports',
+            'Venture Monitor Reports',
+            'Private Equity Reports',
+            'M&A Reports',
+            'Fundraising Reports',
+            'Fund Performance Reports',
+            'Credit Reports',
+            'Private Debt Reports',
+        }
+
+        for block_text, link in blocks:
+            if 'Research ###' not in block_text:
+                continue
+            clean = re.sub(r'!\[[^\]]*\]\([^)]+\)\s*', '', block_text).strip()
+            clean = re.sub(r'^Research\s+###\s+', '', clean)
+            clean = re.sub(r'\s+Learn more.*$', '', clean).strip()
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            if not clean:
+                continue
+
+            m_date = re.search(r'([A-Z][a-z]+\.?\s+\d{1,2},\s+\d{4})\s*$', clean)
+            date_str = m_date.group(1) if m_date else ''
+            prefix = clean[:m_date.start()].strip() if m_date else clean
+
+            m_title = re.match(r'(.+?)\s+(The|Our|This|These|A|An)\s+(.+)$', prefix)
+            if m_title:
+                title = m_title.group(1).strip()
+                desc = f"{m_title.group(2)} {m_title.group(3).strip()}"
+            else:
+                title = prefix.strip()
+                desc = title
+
+            title = re.sub(r'\s+', ' ', title).strip()
+            desc = re.sub(r'\s+', ' ', desc).strip()
+            if title in stop_titles:
+                continue
+            if not title or not link or link in seen:
+                continue
+            if not date_str:
+                continue
+            seen.add(link)
+            items.append({
+                'title': title,
+                'link': link,
+                'description': desc or title,
+                'date_str': date_str,
+            })
+        return items
+
     def _generate_yardeni_morning_briefing(self, markdown_text: str, public_base: str = "") -> str:
         ch = self.config["output"]["channel"]
         builder = RSSBuilder(ch["title"], public_base or ch["link"], ch["description"])
@@ -587,35 +691,40 @@ class WebToRSS:
         public_base = (public_base or "").rstrip('/')
 
         section = markdown_text.split('## Morning Briefing', 1)[1] if '## Morning Briefing' in markdown_text else markdown_text
-        blocks = re.findall(
-            r'^### \[(.*?)\]\((https://yardeni\.com/morning-briefing/[^)]+)\)\s*\n+(.*?)(?=^### \[|\Z)',
+        links = re.findall(
+            r'\[(Morning Briefing [A-Za-z]+ \d{1,2}, \d{4} ## .*?)\]\((https?://yardeni\.com/research/morning-briefing/[^)]+)\)',
             section,
-            re.M | re.S,
+            re.S,
         )
 
         item_cache: Dict[str, Dict[str, str]] = {}
         seen = set()
         count = 0
 
-        for title, link, body in blocks:
-            title = html.unescape(title).strip()
-            if not title or title.lower() == 'morning briefing':
-                continue
-
-            m_desc = re.search(r'Executive Summary:\s*(.*)', body)
-            desc = m_desc.group(1).strip() if m_desc else ''
-            desc = re.sub(r'\s+', ' ', desc)
-            if not desc:
-                desc = title
-
-            m_date = re.search(r'([A-Za-z]+\s+\d{1,2},\s+\d{4})', body)
-            date_str = m_date.group(1) if m_date else None
-
+        for raw_text, link in links:
             slug = link.rstrip('/').split('/')[-1]
             guid = self._md5(f'yardeni|{slug}')
             if guid in seen:
                 continue
             seen.add(guid)
+
+            m_date = re.search(r'Morning Briefing ([A-Za-z]+ \d{1,2}, \d{4})', raw_text)
+            date_str = m_date.group(1) if m_date else None
+            title = slug.replace('-', ' ').strip().title()
+            title = re.sub(r'\bUs\b', 'US', title)
+            title = re.sub(r'\bAi\b', 'AI', title)
+            title = re.sub(r'\bCpi\b', 'CPI', title)
+            title = re.sub(r'\bPce\b', 'PCE', title)
+            title = re.sub(r'\bPe\b', 'PE', title)
+
+            desc = raw_text
+            if '##' in desc:
+                desc = desc.split('##', 1)[1].strip()
+            desc = re.sub(r'\s+', ' ', desc).strip()
+            if len(desc) > 600:
+                desc = desc[:600].rsplit(' ', 1)[0].strip() + '...'
+            if not desc:
+                desc = title
 
             local_link = f"{public_base}/item/{quote(feed_name, safe='')}/{quote(slug, safe='')}" if public_base else link
 
@@ -757,33 +866,15 @@ class WebToRSS:
             body = page_html[end:next_start].strip()
 
             if parse_mode == "pitchbook_short_title":
-                # 从当前匹配行提取 "Learn more" 前的正文片段
-                full_line = full.replace("\n", " ").strip()
-                m_line = re.search(r"Research\s+###\s+", full_line)
-                if m_line:
-                    tail = full_line[m_line.end():]
-                else:
-                    tail = full_line
-
-                # 去除末尾链接，保留 "Title The ... Learn more"
-                tail = re.sub(r"\]\([^)]*\)$", "", tail)
-                if "Learn more" in tail:
-                    tail, _ = tail.split("Learn more", 1)
-                tail = tail.strip()
-
-                # 若正文前含标题，去掉标题前缀，取描述
-                if tail.startswith(title_raw):
-                    tail = tail[len(title_raw):].strip()
-
-                desc = tail if tail else title_raw
-                title_raw = title_raw.strip().split("|")[0].strip()
-
-                # 尝试解析日期
-                m_date = re.search(r"([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})", full_line)
-                if m_date:
-                    date_str = m_date.group(1)
-                else:
-                    date_str = None
+                parsed_blocks = self._extract_pitchbook_report_blocks(page_html)
+                if idx >= len(parsed_blocks):
+                    continue
+                block = parsed_blocks[idx]
+                title_raw = block['title']
+                link = block['link']
+                raw_link = link
+                desc = block['description']
+                date_str = block['date_str'] or None
             else:
                 if body:
                     desc, date_str = self._parse_desc_and_date(body)

@@ -3,10 +3,8 @@ name: Update RSS Feeds
 on:
   workflow_dispatch:
   schedule:
-    # Beijing time 07:25 = UTC 23:25 (previous day)
-    - cron: "25 23 * * *"
-    # Beijing time 17:15 = UTC 09:15
-    - cron: "15 9 * * *"
+    # Weekdays in Beijing once per day. 18:15 CST = 10:15 UTC (Mon-Fri)
+    - cron: "15 10 * * 1-5"
 
 permissions:
   contents: read
@@ -62,26 +60,11 @@ jobs:
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          DOW=$(date -u +%u)
-          HM=$(date -u +%H:%M)
-          # 只在“北京时间周一 07:25 / 17:15”这两个窗口更新 blackrock/barclays
-          # 对应 UTC：周日 23:25（DOW=7）和 周一 09:15（DOW=1）
-          if [ "$DOW" = "7" ] && [ "$HM" = "23:25" ]; then
-            UPDATE_SPECIAL=1
-          elif [ "$DOW" = "1" ] && [ "$HM" = "09:15" ]; then
-            UPDATE_SPECIAL=1
-          else
-            UPDATE_SPECIAL=0
-          fi
 
-          # Yardeni 继续每次都做本地化，blackrock/barclays 只在指定窗口重建
+          # 每次工作日定时更新都直接重建，避免 blackrock/barclays 长期停留在旧值
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "yardeni_morning_briefing"
-          if [ "$UPDATE_SPECIAL" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "blackrock_weekly_commentary"
-            python scripts/build_barclays_feed.py site "$BASE_URL"
-          else
-            python scripts/restore_live_pages_feed.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights"
-          fi
+          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "blackrock_weekly_commentary"
+          python scripts/build_barclays_feed.py site "$BASE_URL"
 
       - name: Add index page
         run: |

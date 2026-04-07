@@ -17,39 +17,32 @@ DESCRIPTION = "Barclays Investment Bank analyses key macroeconomic developments 
 
 
 def fetch_page() -> str:
-    r = requests.get(URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get("https://r.jina.ai/http://www.ib.barclays/our-insights/weekly-insights.html", timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     return r.text
 
 
-def extract_latest(html_text: str):
-    m = re.search(r'Weekly Insights\s*\n\s*27\s+Mar\s+2026.*?<h2>\s*(.*?)\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
+def extract_latest(markdown_text: str):
+    text = markdown_text.replace('\r', '')
+
+    m = re.search(
+        r'##\s+(.+?)\n\n(.+?)(?:\n\n###\s+Get the latest report|\n\n\*\s+\[Global Economics Weekly:)',
+        text,
+        re.S,
+    )
     if not m:
-        m = re.search(r'<h2>\s*Extend\.\.\. and hope for an end\s*</h2>\s*<p><span class="intro">(.*?)</span></p>(.*?)(?:<div class="clear"></div>|</div>\s*<div class="whitespace20">)', html_text, re.S | re.I)
-        if not m:
-            raise RuntimeError("Could not parse Barclays weekly insights page")
-        title = 'Extend... and hope for an end'
-        intro = m.group(1).strip()
-        body = m.group(2)
-    else:
-        title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-        intro = m.group(2).strip()
-        body = m.group(3)
+        raise RuntimeError("Could not parse Barclays weekly insights page")
 
-    body = re.sub(r'\s+', ' ', body)
+    title = re.sub(r'\s+', ' ', m.group(1)).strip()
+    body = re.sub(r'\s+', ' ', m.group(2)).strip()
     body = body.replace('&nbsp;', ' ')
-    # keep simple allowed markup only
-    html_block = f'<p>{html.escape(intro)}</p>'
 
-    list_items = re.findall(r'<li>(.*?)</li>', body, re.S | re.I)
-    if list_items:
-        html_block += '<ul>'
-        for li in list_items:
-            clean = li.replace('<br>', ' ').replace('<br/>', ' ').replace('<br />', ' ')
-            html_block += f'<li>{clean}</li>'
-        html_block += '</ul>'
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', m.group(2)) if p.strip()]
+    intro = re.sub(r'\s+', ' ', paragraphs[0]).strip() if paragraphs else body
+    clean_paragraphs = [re.sub(r'\s+', ' ', p).strip() for p in paragraphs[:6]]
+    html_block = ''.join(f'<p>{html.escape(p)}</p>' for p in clean_paragraphs)
 
-    desc = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', intro))).strip()
+    desc = intro
     return title, desc, html_block
 
 
