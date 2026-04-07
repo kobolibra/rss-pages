@@ -3,8 +3,8 @@ name: Update RSS Feeds
 on:
   workflow_dispatch:
   schedule:
-    # Weekdays in Beijing once per day. 18:15 CST = 10:15 UTC (Mon-Fri)
-    - cron: "15 10 * * 1-5"
+    # Weekdays in Beijing once per day. 10:30 CST = 02:30 UTC (Mon-Fri)
+    - cron: "30 2 * * 1-5"
 
 permissions:
   contents: read
