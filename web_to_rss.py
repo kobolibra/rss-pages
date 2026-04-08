@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -175,15 +176,30 @@ class WebToRSS:
         if headers:
             hdr.update(headers)
 
+        def _good(txt: str) -> bool:
+            return bool(txt) and "Just a moment" not in txt and "Cloudflare" not in txt[:500]
+
+        def _get_with_retries(target_url: str, timeout: int, attempts: int = 3) -> str:
+            nonlocal last_error
+            for attempt in range(attempts):
+                try:
+                    r = requests.get(target_url, headers=hdr, timeout=timeout)
+                    r.raise_for_status()
+                    txt = r.text
+                    if _good(txt):
+                        return txt
+                    last_error = ValueError(f"fetch looks blocked: {target_url}")
+                except Exception as e:
+                    last_error = e
+                    if attempt == attempts - 1:
+                        break
+                    time.sleep(2 * (attempt + 1))
+            raise last_error
+
         # raw-first path for image/DOM-sensitive pages
         if prefer_raw:
             try:
-                r = requests.get(url, headers=hdr, timeout=30)
-                r.raise_for_status()
-                txt = r.text
-                if txt and "Just a moment" not in txt and "Cloudflare" not in txt[:500]:
-                    return txt
-                last_error = ValueError("raw fetch looks blocked")
+                return _get_with_retries(url, timeout=45, attempts=2)
             except Exception as e:
                 last_error = e
 
@@ -191,15 +207,8 @@ class WebToRSS:
         try:
             if url.startswith('http://') or url.startswith('https://'):
                 proxy_url = f"https://r.jina.ai/{url}"
-                r = requests.get(proxy_url, headers=hdr, timeout=30)
-            else:
-                r = requests.get(url, headers=hdr, timeout=30)
-
-            r.raise_for_status()
-            txt = r.text
-            if txt and "Just a moment" not in txt and "Cloudflare" not in txt[:500]:
-                return txt
-            last_error = ValueError("normal fetch looks blocked")
+                return _get_with_retries(proxy_url, timeout=60, attempts=3)
+            return _get_with_retries(url, timeout=45, attempts=2)
         except Exception as e:
             last_error = e
 
