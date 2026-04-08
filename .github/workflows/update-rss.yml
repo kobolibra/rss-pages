@@ -56,12 +56,12 @@ jobs:
         run: |
           cp feeds/output/*.xml site/
 
-      - name: Rewrite feeds to local item pages for readers
+      - name: Enrich feeds with content while keeping source links
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
-          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary_diffbot,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
+          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
 
       - name: Add index page
@@ -73,7 +73,6 @@ jobs:
             <ul>
               <li><a href="pantheonmacro.xml">pantheonmacro</a></li>
               <li><a href="trivium_finance_regs.xml">Trivium Finance Regs</a></li>
-              <li><a href="blackrock_weekly_commentary_diffbot.xml">BlackRock Weekly Commentary Diffbot</a></li>
               <li><a href="barclays_weekly_insights.xml">Barclays Weekly Insights</a></li>
               <li><a href="blackrock_weekly_commentary.xml">blackrock_weekly_commentary</a></li>
               <li><a href="carlyle_insights.xml">carlyle_insights</a></li>

@@ -88,8 +88,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         raise RuntimeError(f"No channel in {xml_path}")
 
     channel_title = get_text(channel, "title")
-    channel_link = get_text(channel, "link")
-    channel_link = f"{public_base.rstrip('/')}/{feed_name}.xml"
+    channel_link = get_text(channel, "link") or f"{public_base.rstrip('/')}/{feed_name}.xml"
     channel_desc = get_text(channel, "description")
     channel_lang = get_text(channel, "language") or "en"
     channel_build = get_text(channel, "lastBuildDate") or get_text(channel, "pubDate")
@@ -116,8 +115,8 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
             encoding="utf-8",
         )
 
-        item_link = local_url
-        item_guid = local_url
+        item_link = link or local_url
+        item_guid = guid or item_link
         item_desc = desc
 
         items.append(
@@ -147,7 +146,8 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         ET.SubElement(it, "title").text = item["title"]
         ET.SubElement(it, "link").text = item["link"]
         guid_el = ET.SubElement(it, "guid")
-        guid_el.set("isPermaLink", "true")
+        is_permalink = str(item["guid"]).startswith("http://") or str(item["guid"]).startswith("https://")
+        guid_el.set("isPermaLink", "true" if is_permalink else "false")
         guid_el.text = item["guid"]
         if item["pub_date"]:
             ET.SubElement(it, "pubDate").text = item["pub_date"]

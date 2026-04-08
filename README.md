@@ -5,7 +5,6 @@ This bundle contains the first-pass GitHub Pages static RSS setup.
 ## Included feeds
 - pantheonmacro
 - Trivium Finance Regs
-- BlackRock Weekly Commentary Diffbot
 - Barclays Weekly Insights
 - blackrock_weekly_commentary
 - carlyle_insights
