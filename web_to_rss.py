@@ -384,18 +384,32 @@ class WebToRSS:
             timeout=30,
         ).text
         soup = BeautifulSoup(raw_html, 'html.parser')
+
+        meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
+        if meta_title and (meta_title.get('content') or '').strip():
+            title = (meta_title.get('content') or '').strip()
+        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
+
         body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
         if not body_tabs:
             raise ValueError('blackrock_weekly body tabs not found')
         tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
         tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
         wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
-        siblings = wrap.find_next_siblings('div', class_='ls-cmp-wrap', limit=len(tab0_items)) if wrap and tab0_items else []
+        siblings = []
+        if wrap and tab0_items:
+            for sib in wrap.find_next_siblings('div', class_='ls-cmp-wrap'):
+                comp = sib.find(attrs={'data-componentname': True})
+                comp_name = (comp.get('data-componentname') or '').strip().lower() if comp else ''
+                if comp_name in {'paragraph', 'image'}:
+                    siblings.append(sib)
+                if len(siblings) >= len(tab0_items):
+                    break
         if not siblings:
             raise ValueError('blackrock_weekly body components not found')
 
         content_parts: List[str] = []
-        description = ''
+        description = (meta_summary.get('content') or '').strip() if meta_summary else ''
 
         def _is_chart_label(elem, text: str) -> bool:
             if elem.name != 'p':
