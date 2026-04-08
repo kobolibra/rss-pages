@@ -96,6 +96,8 @@ class RSSBuilder:
         pretty = pretty.replace('&lt;p&gt;', '<p>')
         pretty = pretty.replace('&lt;a ', '<a ')
         pretty = pretty.replace('&lt;/a&gt;', '</a>')
+        pretty = pretty.replace('&lt;strong&gt;', '<strong>')
+        pretty = pretty.replace('&lt;/strong&gt;', '</strong>')
         pretty = pretty.replace('&gt;', '>')
         pretty = pretty.replace('&quot;', '"')
         return pretty
@@ -390,7 +392,18 @@ class WebToRSS:
             comp = sib.find(attrs={'data-componentname': True})
             comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
             if comp_name.lower() == 'paragraph':
-                for elem in sib.select('div.para-content h2, div.para-content p'):
+                for elem in sib.find_all(['h2', 'p', 'img']):
+                    if elem.name == 'img':
+                        src = (elem.get('data-src') or elem.get('src') or '').strip()
+                        if not src:
+                            continue
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        alt = (elem.get('alt') or 'BlackRock commentary image').strip()
+                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
+                        continue
+                    if 'footnotes' in ((elem.get('class') or [])):
+                        continue
                     text = elem.get_text(' ', strip=True)
                     text = re.sub(r'\s+', ' ', text).strip()
                     if not text:
@@ -407,14 +420,6 @@ class WebToRSS:
                         if not description and len(text) > 120:
                             description = text
                         content_parts.append(f'<p>{html.escape(text)}</p>')
-                for img in sib.find_all('img'):
-                    src = (img.get('data-src') or img.get('src') or '').strip()
-                    if not src:
-                        continue
-                    if src.startswith('/'):
-                        src = 'https://www.blackrock.com' + src
-                    alt = (img.get('alt') or 'BlackRock commentary image').strip()
-                    content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
             elif comp_name.lower() == 'image':
                 heading = sib.find('h2')
                 if heading:
