@@ -160,32 +160,42 @@ class WebToRSS:
     def _md5(s: str) -> str:
         return hashlib.md5(s.encode("utf-8")).hexdigest()
 
-    def _fetch_html(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    def _fetch_html(self, url: str, headers: Optional[Dict[str, str]] = None, prefer_raw: bool = False) -> str:
         """
         Fetch strategy:
-        1) Try normal path first (r.jina.ai proxy) for speed and cost.
-        2) If it fails and cloudflare fallback is enabled, try Browser Rendering.
+        1) Default: try r.jina.ai text extraction first for simpler parsing.
+        2) For pages that need DOM/image fidelity, prefer_raw=True to fetch original HTML first.
+        3) If blocked/failing and cloudflare fallback is enabled, try Browser Rendering.
         """
         last_error = None
+        hdr = {"User-Agent": "Mozilla/5.0 (compatible; WebToRSS/1.0)"}
+        if headers:
+            hdr.update(headers)
 
-        # 1) normal fetch first (legacy behavior)
+        # raw-first path for image/DOM-sensitive pages
+        if prefer_raw:
+            try:
+                r = requests.get(url, headers=hdr, timeout=30)
+                r.raise_for_status()
+                txt = r.text
+                if txt and "Just a moment" not in txt and "Cloudflare" not in txt[:500]:
+                    return txt
+                last_error = ValueError("raw fetch looks blocked")
+            except Exception as e:
+                last_error = e
+
+        # default / fallback text-first path via r.jina.ai
         try:
             if url.startswith('http://') or url.startswith('https://'):
                 proxy_url = f"https://r.jina.ai/{url}"
-                hdr = {"User-Agent": "Mozilla/5.0 (compatible; WebToRSS/1.0)"}
-                if headers:
-                    hdr.update(headers)
                 r = requests.get(proxy_url, headers=hdr, timeout=30)
             else:
-                hdr = headers or {"User-Agent": "Mozilla/5.0 (compatible; WebToRSS/1.0)"}
                 r = requests.get(url, headers=hdr, timeout=30)
 
-            # r.jina may still return 200 but block page; keep as content and only fallback on request exceptions
             r.raise_for_status()
             txt = r.text
             if txt and "Just a moment" not in txt and "Cloudflare" not in txt[:500]:
                 return txt
-            # block-like marker detected -> try cf fallback if enabled
             last_error = ValueError("normal fetch looks blocked")
         except Exception as e:
             last_error = e
@@ -315,6 +325,25 @@ class WebToRSS:
         title = re.sub(r'[*_\s]+$', '', title).strip()
         if not title:
             raise ValueError('blackrock_weekly title not found')
+
+        energy_img_url = ''
+        try:
+            raw_html = requests.get(
+                self.config['source']['url'],
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
+                timeout=30,
+            ).text
+            m_energy = re.search(
+                r'Energy dependencies.*?<img[^>]+data-src="([^"]*chart-of-the-week-[^"]+\.svg)"',
+                raw_html,
+                re.I | re.S,
+            )
+            if m_energy:
+                energy_img_url = m_energy.group(1).strip()
+                if energy_img_url.startswith('/'):
+                    energy_img_url = 'https://www.blackrock.com' + energy_img_url
+        except Exception:
+            energy_img_url = ''
 
         pdf_link = ''
         if video_compact:
@@ -480,6 +509,9 @@ class WebToRSS:
             raise ValueError('blackrock_weekly content empty')
 
         content_html = ''.join(render_line(x) for x in content_lines)
+        if energy_img_url and energy_img_url not in content_html:
+            energy_block = f'<p><img src="{html.escape(energy_img_url)}" alt="Energy dependencies" /></p>'
+            content_html = energy_block + content_html
         if pdf_link:
             content_html = re.sub(
                 r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\"\s<]+\.pdf',
@@ -764,6 +796,8 @@ class WebToRSS:
         src = self.config["source"]["url"]
         headers = self.config["source"].get("headers")
 
+        parse_mode = self.config.get("settings", {}).get("parse_mode")
+
         page_html = None
         if not force:
             page_html = self._load_cache(src)
@@ -771,8 +805,6 @@ class WebToRSS:
         if page_html is None or force:
             page_html = self._fetch_html(src, headers=headers)
             self._save_cache(src, page_html)
-
-        parse_mode = self.config.get("settings", {}).get("parse_mode")
         if parse_mode == "blackrock_weekly_single":
             xml = self._generate_blackrock_weekly(page_html, src)
             out_file = self.config.get("output_file")
