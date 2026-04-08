@@ -24,24 +24,62 @@ def fetch_page() -> str:
 
 def extract_latest(markdown_text: str):
     text = markdown_text.replace('\r', '')
+    if 'Markdown Content:' in text:
+        text = text.split('Markdown Content:', 1)[1]
 
-    m = re.search(
-        r'##\s+(.+?)\n\n(.+?)(?:\n\n###\s+Get the latest report|\n\n\*\s+\[Global Economics Weekly:)',
-        text,
-        re.S,
-    )
-    if not m:
-        raise RuntimeError("Could not parse Barclays weekly insights page")
+    title_match = re.search(r'(?m)^##\s+(.+?)\s*$', text)
+    if not title_match:
+        raise RuntimeError("Could not parse Barclays weekly insights title")
 
-    title = re.sub(r'\s+', ' ', m.group(1)).strip()
-    body = re.sub(r'\s+', ' ', m.group(2)).strip()
-    body = body.replace('&nbsp;', ' ')
+    title = re.sub(r'\s+', ' ', title_match.group(1)).strip()
+    body = text[title_match.end():]
 
-    paragraphs = [p.strip() for p in re.split(r'\n\n+', m.group(2)) if p.strip()]
-    intro = re.sub(r'\s+', ' ', paragraphs[0]).strip() if paragraphs else body
-    clean_paragraphs = [re.sub(r'\s+', ' ', p).strip() for p in paragraphs[:6]]
-    html_block = ''.join(f'<p>{html.escape(p)}</p>' for p in clean_paragraphs)
+    stop_markers = [
+        r'(?m)^###\s+Get the latest report\s*$',
+        r'(?m)^####\s+More from Barclays Research\s*$',
+        r'(?m)^Subscribe to The Eagle Eye Newsletter\s*$',
+        r'(?m)^Country of residence\s*$',
+        r'(?m)^\* We acknowledge and agree',
+        r'(?m)^I consent to my email address',
+        r'(?m)^All fields required\s*$',
+        r'(?m)^Email Cookies\s*$',
+    ]
+    cut = len(body)
+    for marker in stop_markers:
+        m = re.search(marker, body)
+        if m:
+            cut = min(cut, m.start())
+    body = body[:cut].strip()
 
+    raw_blocks = [b.strip() for b in re.split(r'\n\n+', body) if b.strip()]
+    blocks = []
+    for block in raw_blocks:
+        if re.fullmatch(r'Parsys\s+\d+', block):
+            continue
+        clean = re.sub(r'\s+', ' ', block).strip().replace('&nbsp;', ' ')
+        if not clean:
+            continue
+        blocks.append(clean)
+
+    if not blocks:
+        raise RuntimeError("Could not parse Barclays weekly insights body")
+
+    intro = blocks[0]
+
+    html_parts = []
+    for block in blocks:
+        m = re.match(r'^\*\s+\*\*(.+?)\*\*:\s*(.*)$', block)
+        if m:
+            label = re.sub(r'\s+', ' ', m.group(1)).strip()
+            rest = re.sub(r'\s+', ' ', m.group(2)).strip()
+            if rest:
+                html_parts.append(f'<p><strong>{html.escape(label)}:</strong> {html.escape(rest)}</p>')
+            else:
+                html_parts.append(f'<p><strong>{html.escape(label)}:</strong></p>')
+        else:
+            html_parts.append(f'<p>{html.escape(block)}</p>')
+
+    html_block = ''.join(html_parts)
     desc = intro
     return title, desc, html_block
 
