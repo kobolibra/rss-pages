@@ -498,7 +498,14 @@ class WebToRSS:
                     if not text:
                         continue
                     if _is_chart_label(elem, text):
-                        if 'share of energy imports' in text.lower() and 'energy import dependence' in text.lower():
+                        label_span = elem.find('span', class_=re.compile(r'text-sm', re.I)) if elem.name == 'p' else None
+                        label_text = re.sub(r'\s+', ' ', label_span.get_text(' ', strip=True)).strip() if label_span else ''
+                        if label_text:
+                            _push_html(f'<p><strong>{html.escape(label_text)}</strong></p>', label_text)
+                            rest = text.replace(label_text, '', 1).strip(' :-–—')
+                            if rest:
+                                _push_html(f'<p>{html.escape(rest)}</p>', rest)
+                        elif 'share of energy imports' in text.lower() and 'energy import dependence' in text.lower():
                             _push_html(f'<p>{html.escape(text)}</p>', text)
                         continue
                     if text.lower().startswith('read our past weekly market'):
