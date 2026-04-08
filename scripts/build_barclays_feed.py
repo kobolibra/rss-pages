@@ -50,12 +50,13 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     rss = Element('rss', version='2.0')
     channel = SubElement(rss, 'channel')
     SubElement(channel, 'title').text = TITLE
-    SubElement(channel, 'link').text = URL
+    SubElement(channel, 'link').text = f"{public_base.rstrip('/')}/barclays_weekly_insights.xml"
     SubElement(channel, 'description').text = DESCRIPTION
     SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'
 
-    item_url = URL
+    slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower() or 'barclays-weekly'
+    item_url = f"{public_base.rstrip('/')}/item/barclays_weekly_insights/{slug}/"
 
     item = SubElement(channel, 'item')
     SubElement(item, 'title').text = title
@@ -66,7 +67,7 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     SubElement(item, 'pubDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(item, 'description').text = desc
     content = SubElement(item, QName(CONTENT_NS, 'encoded'))
-    content.text = content_html
+    content.text = desc
 
     return minidom.parseString(ET.tostring(rss, encoding='utf-8')).toprettyxml(indent='  ', encoding='utf-8')
 

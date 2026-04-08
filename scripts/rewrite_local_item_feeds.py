@@ -10,7 +10,8 @@ from xml.etree import ElementTree as ET
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
 ET.register_namespace("content", CONTENT_NS)
 
-
+SOURCE_LINK_FEEDS = {"carlyle_insights", "pitchbook_reports"}
+SUMMARY_LOCAL_FEEDS = {"pantheonmacro", "trivium_finance_regs", "yardeni_morning_briefing"}
 
 
 def slugify_from_link_or_title(link: str, title: str) -> str:
@@ -101,7 +102,8 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         guid = get_text(item, "guid")
         pub_date = get_text(item, "pubDate")
         author = get_text(item, "author")
-        content_html = get_content_encoded(item) or desc
+        source_content_html = get_content_encoded(item) or desc
+        content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html
         full_text = html_to_text(content_html)
         if len(full_text) > len(desc or ""):
             desc = full_text
@@ -115,8 +117,8 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
             encoding="utf-8",
         )
 
-        item_link = link or local_url
-        item_guid = guid or item_link
+        item_link = (link or local_url) if feed_name in SOURCE_LINK_FEEDS else local_url
+        item_guid = (guid or item_link) if feed_name in SOURCE_LINK_FEEDS else local_url
         item_desc = desc
 
         items.append(
