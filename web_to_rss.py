@@ -411,6 +411,13 @@ class WebToRSS:
         content_parts: List[str] = []
         description = (meta_summary.get('content') or '').strip() if meta_summary else ''
 
+        hero_bullets = []
+        for bullet in soup.select('div.key-points div.bullet'):
+            body_el = bullet.select_one('div.bullet-summary p')
+            bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
+            if bbody:
+                hero_bullets.append(bbody)
+
         intro_text = ''
         download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
         if not download_cta:
@@ -428,6 +435,9 @@ class WebToRSS:
                     break
 
         seed_blocks = []
+        seed_blocks.append((f'<p><strong>{html.escape(title)}</strong></p>', title))
+        for bullet_text in hero_bullets[:3]:
+            seed_blocks.append((f'<p>• {html.escape(bullet_text)}</p>', bullet_text))
         if intro_text:
             seed_blocks.append((f'<p>{html.escape(intro_text)}</p>', intro_text))
             description = intro_text
@@ -488,6 +498,8 @@ class WebToRSS:
                     if not text:
                         continue
                     if _is_chart_label(elem, text):
+                        if 'share of energy imports' in text.lower() and 'energy import dependence' in text.lower():
+                            _push_html(f'<p>{html.escape(text)}</p>', text)
                         continue
                     if text.lower().startswith('read our past weekly market'):
                         continue
