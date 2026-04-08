@@ -397,25 +397,28 @@ class WebToRSS:
         content_parts: List[str] = []
         description = ''
 
+        def _is_chart_label(elem, text: str) -> bool:
+            if elem.name != 'p':
+                return False
+            if elem.find('span', class_=re.compile(r'text-sm', re.I)):
+                return True
+            low = text.lower()
+            if 'share of energy imports' in low and 'energy import dependence' in low:
+                return True
+            return False
+
         for sib in siblings:
             comp = sib.find(attrs={'data-componentname': True})
             comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
             if comp_name.lower() == 'paragraph':
-                for elem in sib.find_all(['h2', 'p', 'img']):
-                    if elem.name == 'img':
-                        src = (elem.get('data-src') or elem.get('src') or '').strip()
-                        if not src:
-                            continue
-                        if src.startswith('/'):
-                            src = 'https://www.blackrock.com' + src
-                        alt = (elem.get('alt') or 'BlackRock commentary image').strip()
-                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
-                        continue
+                for elem in sib.find_all(['h2', 'p']):
                     if 'footnotes' in ((elem.get('class') or [])):
                         continue
                     text = elem.get_text(' ', strip=True)
                     text = re.sub(r'\s+', ' ', text).strip()
                     if not text:
+                        continue
+                    if _is_chart_label(elem, text):
                         continue
                     if text.lower().startswith('read our past weekly market'):
                         continue
@@ -435,14 +438,6 @@ class WebToRSS:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if htxt:
                         content_parts.append(f'<p><strong>{html.escape(htxt)}</strong></p>')
-                for img in sib.find_all('img'):
-                    src = (img.get('data-src') or img.get('src') or '').strip()
-                    if not src:
-                        continue
-                    if src.startswith('/'):
-                        src = 'https://www.blackrock.com' + src
-                    alt = (img.get('alt') or 'BlackRock commentary image').strip()
-                    content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
                 for bullet in sib.select('div.bullet'):
                     title_el = bullet.select_one('div.bullet-title span')
                     body_el = bullet.select_one('div.bullet-summary p')
