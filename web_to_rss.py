@@ -413,10 +413,12 @@ class WebToRSS:
 
         hero_bullets = []
         for bullet in soup.select('div.key-points div.bullet'):
+            title_el = bullet.select_one('div.bullet-title span')
             body_el = bullet.select_one('div.bullet-summary p')
+            btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
             bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
-            if bbody:
-                hero_bullets.append(bbody)
+            if btitle or bbody:
+                hero_bullets.append((btitle, bbody))
 
         intro_text = ''
         download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
@@ -436,8 +438,11 @@ class WebToRSS:
 
         seed_blocks = []
         seed_blocks.append((f'<p><strong>{html.escape(title)}</strong></p>', title))
-        for bullet_text in hero_bullets[:3]:
-            seed_blocks.append((f'<p>• {html.escape(bullet_text)}</p>', bullet_text))
+        for bullet_title, bullet_text in hero_bullets:
+            if bullet_title:
+                seed_blocks.append((f'<p><strong>{html.escape(bullet_title)}</strong></p>', bullet_title))
+            if bullet_text:
+                seed_blocks.append((f'<p>{html.escape(bullet_text)}</p>', bullet_text))
         if intro_text:
             seed_blocks.append((f'<p>{html.escape(intro_text)}</p>', intro_text))
             description = intro_text
@@ -527,10 +532,13 @@ class WebToRSS:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if htxt:
                         _push_html(f'<p><strong>{html.escape(htxt)}</strong></p>', htxt)
-                for p in sib.find_all('p'):
-                    if 'footnotes' in ((p.get('class') or [])):
+                for elem in sib.find_all(['span', 'p']):
+                    classes = ' '.join(elem.get('class') or [])
+                    if 'fa ' in classes or classes.startswith('fa') or 'pseudo-mask' in classes:
                         continue
-                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
+                    if 'footnotes' in classes:
+                        continue
+                    text = re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
                     if not text:
                         continue
                     if text.startswith('Source:') or text.startswith('Sources:'):
