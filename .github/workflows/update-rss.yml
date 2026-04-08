@@ -63,6 +63,10 @@ jobs:
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
 
+      - name: Validate generated feeds
+        run: |
+          python scripts/validate_feeds.py site
+
       - name: Add index page
         run: |
           cat > site/index.html <<'EOF'
