@@ -411,15 +411,6 @@ class WebToRSS:
         content_parts: List[str] = []
         description = (meta_summary.get('content') or '').strip() if meta_summary else ''
 
-        hero_bullets = []
-        for bullet in soup.select('div.key-points div.bullet'):
-            title_el = bullet.select_one('div.bullet-title span')
-            body_el = bullet.select_one('div.bullet-summary p')
-            btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
-            bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
-            if btitle or bbody:
-                hero_bullets.append((btitle, bbody))
-
         intro_text = ''
         download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
         if not download_cta:
@@ -437,11 +428,6 @@ class WebToRSS:
                     break
 
         seed_blocks = []
-        for btitle, bbody in hero_bullets:
-            if btitle:
-                seed_blocks.append((f'<p><strong>{html.escape(btitle)}</strong></p>', btitle))
-            if bbody:
-                seed_blocks.append((f'<p>{html.escape(bbody)}</p>', bbody))
         if intro_text:
             seed_blocks.append((f'<p>{html.escape(intro_text)}</p>', intro_text))
             description = intro_text
