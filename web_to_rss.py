@@ -411,6 +411,40 @@ class WebToRSS:
         content_parts: List[str] = []
         description = (meta_summary.get('content') or '').strip() if meta_summary else ''
 
+        hero_bullets = []
+        for bullet in soup.select('div.key-points div.bullet'):
+            title_el = bullet.select_one('div.bullet-title span')
+            body_el = bullet.select_one('div.bullet-summary p')
+            btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
+            bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
+            if btitle or bbody:
+                hero_bullets.append((btitle, bbody))
+
+        intro_text = ''
+        download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
+        if not download_cta:
+            download_cta = soup.find('a', string=re.compile(r'Download full commentary', re.I))
+        if download_cta:
+            para_wrap = download_cta.find_parent('div', class_=re.compile(r'para-content', re.I))
+            if para_wrap:
+                for p in para_wrap.find_all('p'):
+                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
+                    if not text:
+                        continue
+                    if 'Download full commentary' in text:
+                        continue
+                    intro_text = text
+                    break
+
+        for btitle, bbody in hero_bullets:
+            if btitle:
+                content_parts.append(f'<p><strong>{html.escape(btitle)}</strong></p>')
+            if bbody:
+                content_parts.append(f'<p>{html.escape(bbody)}</p>')
+        if intro_text:
+            content_parts.append(f'<p>{html.escape(intro_text)}</p>')
+            description = intro_text
+
         def _is_chart_label(elem, text: str) -> bool:
             if elem.name != 'p':
                 return False
