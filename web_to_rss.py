@@ -508,8 +508,17 @@ class WebToRSS:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if htxt:
                         _push_html(f'<p><strong>{html.escape(htxt)}</strong></p>', htxt)
-                # Image blocks on BlackRock often contain repeated date/event helper text or footnotes.
-                # Keep the image + heading only; the concise hero bullets already capture Market backdrop / Week ahead.
+                for p in sib.find_all('p'):
+                    if 'footnotes' in ((p.get('class') or [])):
+                        continue
+                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
+                    if not text:
+                        continue
+                    if text.startswith('Source:') or text.startswith('Sources:'):
+                        continue
+                    if text.startswith('Past performance is not a reliable indicator'):
+                        continue
+                    _push_html(f'<p>{html.escape(text)}</p>', text)
 
         if not content_parts:
             raise ValueError('blackrock_weekly content empty')
