@@ -63,9 +63,15 @@ jobs:
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
 
-      - name: Validate generated feeds
+      - name: Validate generated feeds (restore last known-good on regression)
         run: |
-          python scripts/validate_feeds.py site
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          if ! python scripts/validate_feeds.py site; then
+            echo "Validation regression detected; restoring last known-good feeds from live Pages"
+            python scripts/restore_live_pages_feed.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights,trivium_finance_regs"
+            python scripts/validate_feeds.py site
+          fi
 
       - name: Add index page
         run: |
