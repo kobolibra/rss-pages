@@ -98,6 +98,14 @@ def sanitize_feed_html(feed_name: str, value: str) -> str:
             flags=re.I | re.S,
         )
         value = re.sub(r"\n\s*\n+", "\n", value).strip()
+    if feed_name == "pantheonmacro":
+        paragraphs = re.findall(r"<p\b[^>]*>.*?</p>", value, flags=re.I | re.S)
+        if paragraphs:
+            value = "\n".join(p.strip() for p in paragraphs)
+        else:
+            value = re.sub(r"<h4\b[^>]*>.*?</h4>", "", value, flags=re.I | re.S)
+            value = re.sub(r"<div\b[^>]*class=\"item_info\"[^>]*>.*?</div>", "", value, flags=re.I | re.S)
+            value = value.strip()
     return value
 
 
