@@ -662,7 +662,7 @@ class WebToRSS:
 
     def _generate_yardeni_morning_briefing(self, markdown_text: str, public_base: str = "") -> str:
         ch = self.config["output"]["channel"]
-        builder = RSSBuilder(ch["title"], public_base or ch["link"], ch["description"])
+        builder = RSSBuilder(ch["title"], ch["link"], ch["description"])
 
         settings = self.config.get("settings", {})
         max_items = int(settings.get("max_items", 30))
@@ -705,7 +705,7 @@ class WebToRSS:
             if not desc:
                 desc = title
 
-            local_link = f"{public_base}/item/{quote(feed_name, safe='')}/{quote(slug, safe='')}" if public_base else link
+            local_link = link
 
             if date_str:
                 try:
