@@ -485,6 +485,8 @@ class WebToRSS:
                 src = 'https://www.blackrock.com' + src
             _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
 
+        deferred_blocks = []
+
         for sib in siblings:
             comp = sib.find(attrs={'data-componentname': True})
             comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
@@ -530,12 +532,20 @@ class WebToRSS:
                             description = text
                         _push_html(f'<p>{html.escape(text)}</p>', text)
             elif comp_name.lower() == 'image':
-                _append_image(sib.find('img'))
+                local_blocks = []
+                img = sib.find('img')
+                if img:
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if src:
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        local_blocks.append((f'<p><img src="{html.escape(src)}" alt="" /></p>', src, False))
                 heading = sib.find('h2')
+                heading_text = ''
                 if heading:
-                    htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
-                    if htxt:
-                        _push_html(f'<p><strong>{html.escape(htxt)}</strong></p>', htxt)
+                    heading_text = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
+                    if heading_text:
+                        local_blocks.append((f'<p><strong>{html.escape(heading_text)}</strong></p>', heading_text, heading_text.lower() in hero_titles_seen))
                 for elem in sib.find_all(['span', 'p']):
                     classes = ' '.join(elem.get('class') or [])
                     if 'fa ' in classes or classes.startswith('fa') or 'pseudo-mask' in classes:
@@ -549,7 +559,15 @@ class WebToRSS:
                         continue
                     if text.startswith('Past performance is not a reliable indicator'):
                         continue
-                    _push_html(f'<p>{html.escape(text)}</p>', text)
+                    local_blocks.append((f'<p>{html.escape(text)}</p>', text, False))
+                if heading_text.lower() == 'week ahead':
+                    deferred_blocks.extend(local_blocks)
+                else:
+                    for block_html, key, force in local_blocks:
+                        _push_html(block_html, key, force=force)
+
+        for block_html, key, force in deferred_blocks:
+            _push_html(block_html, key, force=force)
 
         if not content_parts:
             raise ValueError('blackrock_weekly content empty')
