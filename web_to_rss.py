@@ -433,6 +433,13 @@ class WebToRSS:
                             description = text
                         content_parts.append(f'<p>{html.escape(text)}</p>')
             elif comp_name.lower() == 'image':
+                img = sib.find('img')
+                if img:
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if src:
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
                 heading = sib.find('h2')
                 if heading:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
