@@ -334,17 +334,25 @@ class WebToRSS:
                 headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
                 timeout=30,
             ).text
-            m_tab0 = re.search(r'<div\s+data-tab-id="0">.*?</div>(.*?)(?:<div\s+data-tab-id="1">|<!--\s*COMPONENT:.*?Asset class views)', raw_html, re.I | re.S)
-            body_html = m_tab0.group(1) if m_tab0 else raw_html
+            soup = BeautifulSoup(raw_html, 'html.parser')
+            body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
             seen_imgs = set()
-            for src in re.findall(r'<img[^>]+(?:data-src|src)="([^"]+\.(?:svg|png|jpg|jpeg|webp))"', body_html, re.I):
-                src = src.strip()
-                if src.startswith('/'):
-                    src = 'https://www.blackrock.com' + src
-                if src in seen_imgs:
-                    continue
-                seen_imgs.add(src)
-                body_image_urls.append(src)
+            if body_tabs:
+                tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
+                tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
+                wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
+                siblings = wrap.find_next_siblings('div', class_='ls-cmp-wrap', limit=len(tab0_items)) if wrap and tab0_items else []
+                for sib in siblings:
+                    for img in sib.find_all('img'):
+                        src = (img.get('data-src') or img.get('src') or '').strip()
+                        if not src:
+                            continue
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        if src in seen_imgs:
+                            continue
+                        seen_imgs.add(src)
+                        body_image_urls.append(src)
         except Exception:
             body_image_urls = []
 
