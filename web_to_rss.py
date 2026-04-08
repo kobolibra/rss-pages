@@ -407,10 +407,29 @@ class WebToRSS:
                 return True
             return False
 
+        def _append_image(img_tag):
+            if not img_tag:
+                return
+            src = (img_tag.get('data-src') or img_tag.get('src') or '').strip()
+            if not src:
+                return
+            if src.startswith('/'):
+                src = 'https://www.blackrock.com' + src
+            content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
+
         for sib in siblings:
             comp = sib.find(attrs={'data-componentname': True})
             comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
+            sib_text = re.sub(r'\s+', ' ', sib.get_text(' ', strip=True)).strip().lower()
+            if sib_text.startswith('read our past weekly market commentaries'):
+                break
+            if 'big calls' in sib_text or 'tactical granular views' in sib_text:
+                break
+
             if comp_name.lower() == 'paragraph':
+                first_img = sib.find('img')
+                if first_img:
+                    _append_image(first_img)
                 for elem in sib.find_all(['h2', 'p']):
                     if 'footnotes' in ((elem.get('class') or [])):
                         continue
@@ -433,18 +452,23 @@ class WebToRSS:
                             description = text
                         content_parts.append(f'<p>{html.escape(text)}</p>')
             elif comp_name.lower() == 'image':
-                img = sib.find('img')
-                if img:
-                    src = (img.get('data-src') or img.get('src') or '').strip()
-                    if src:
-                        if src.startswith('/'):
-                            src = 'https://www.blackrock.com' + src
-                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
+                _append_image(sib.find('img'))
                 heading = sib.find('h2')
                 if heading:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if htxt:
                         content_parts.append(f'<p><strong>{html.escape(htxt)}</strong></p>')
+                for p in sib.find_all('p'):
+                    if 'footnotes' in ((p.get('class') or [])):
+                        continue
+                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
+                    if not text:
+                        continue
+                    if text.startswith('Past performance is not a reliable indicator'):
+                        continue
+                    if text.startswith('Source:') or text.startswith('Sources:'):
+                        continue
+                    content_parts.append(f'<p>{html.escape(text)}</p>')
                 for bullet in sib.select('div.bullet'):
                     title_el = bullet.select_one('div.bullet-title span')
                     body_el = bullet.select_one('div.bullet-summary p')
