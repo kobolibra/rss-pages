@@ -327,35 +327,6 @@ class WebToRSS:
         if not title:
             raise ValueError('blackrock_weekly title not found')
 
-        body_image_urls: List[str] = []
-        try:
-            raw_html = requests.get(
-                self.config['source']['url'],
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
-                timeout=30,
-            ).text
-            soup = BeautifulSoup(raw_html, 'html.parser')
-            body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
-            seen_imgs = set()
-            if body_tabs:
-                tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
-                tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
-                wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
-                siblings = wrap.find_next_siblings('div', class_='ls-cmp-wrap', limit=len(tab0_items)) if wrap and tab0_items else []
-                for sib in siblings:
-                    for img in sib.find_all('img'):
-                        src = (img.get('data-src') or img.get('src') or '').strip()
-                        if not src:
-                            continue
-                        if src.startswith('/'):
-                            src = 'https://www.blackrock.com' + src
-                        if src in seen_imgs:
-                            continue
-                        seen_imgs.add(src)
-                        body_image_urls.append(src)
-        except Exception:
-            body_image_urls = []
-
         pdf_link = ''
         if video_compact:
             exact_pdf = re.search(
@@ -396,143 +367,90 @@ class WebToRSS:
             m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
             date_str = m_date.group(1).strip() if m_date else ''
 
-        lines = [ln.strip() for ln in raw.splitlines()]
-        lines = [ln for ln in lines if ln]
+        raw_html = requests.get(
+            self.config['source']['url'],
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
+            timeout=30,
+        ).text
+        soup = BeautifulSoup(raw_html, 'html.parser')
+        body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
+        if not body_tabs:
+            raise ValueError('blackrock_weekly body tabs not found')
+        tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
+        tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
+        wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
+        siblings = wrap.find_next_siblings('div', class_='ls-cmp-wrap', limit=len(tab0_items)) if wrap and tab0_items else []
+        if not siblings:
+            raise ValueError('blackrock_weekly body components not found')
 
-        # 只取标题之后，且在“Read our past weekly market commentaries”之前
-        start_idx = lines.index(title) if title in lines else 0
-        truncated = []
-        for ln in lines[start_idx:]:
-            if 'Read our past weekly market commentaries' in ln:
-                break
-            truncated.append(ln)
+        content_parts: List[str] = []
+        description = ''
 
-        blacklist = [
-            'capital at risk', 'for public distribution', 'to view this video', 'video player is loading',
-            'current time 0:00', 'loaded: 0%', 'share', 'facebook', 'twitter', 'linkedin',
-            'opening frame:', 'camera frame', 'closing frame:', 'header:', 'transcript',
-            'download full commentary', 'market commentary', 'asset class views', 'change location'
-        ]
+        for sib in siblings:
+            comp = sib.find(attrs={'data-componentname': True})
+            comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
+            if comp_name.lower() == 'paragraph':
+                for elem in sib.select('div.para-content h2, div.para-content p'):
+                    text = elem.get_text(' ', strip=True)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if not text:
+                        continue
+                    if text.lower().startswith('read our past weekly market'):
+                        continue
+                    if text.startswith('Source:') or text.startswith('Sources:'):
+                        continue
+                    if text.startswith('Past performance is not a reliable indicator'):
+                        continue
+                    if elem.name == 'h2':
+                        content_parts.append(f'<p><strong>{html.escape(text)}</strong></p>')
+                    else:
+                        if not description and len(text) > 120:
+                            description = text
+                        content_parts.append(f'<p>{html.escape(text)}</p>')
+                for img in sib.find_all('img'):
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if not src:
+                        continue
+                    if src.startswith('/'):
+                        src = 'https://www.blackrock.com' + src
+                    alt = (img.get('alt') or 'BlackRock commentary image').strip()
+                    content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
+            elif comp_name.lower() == 'image':
+                heading = sib.find('h2')
+                if heading:
+                    htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
+                    if htxt:
+                        content_parts.append(f'<p><strong>{html.escape(htxt)}</strong></p>')
+                for img in sib.find_all('img'):
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if not src:
+                        continue
+                    if src.startswith('/'):
+                        src = 'https://www.blackrock.com' + src
+                    alt = (img.get('alt') or 'BlackRock commentary image').strip()
+                    content_parts.append(f'<p><img src="{html.escape(src)}" alt="{html.escape(alt)}" /></p>')
+                for bullet in sib.select('div.bullet'):
+                    title_el = bullet.select_one('div.bullet-title span')
+                    body_el = bullet.select_one('div.bullet-summary p')
+                    btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
+                    bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
+                    if btitle:
+                        content_parts.append(f'<p>{html.escape(btitle)}</p>')
+                    if bbody:
+                        content_parts.append(f'<p>{html.escape(bbody)}</p>')
 
-        def noisy(s: str) -> bool:
-            low = s.lower()
-            if any(b in low for b in blacklist):
-                return True
-            return False
-
-        kept = []
-        for ln in truncated:
-            if noisy(ln):
-                continue
-            kept.append(ln)
-
-        # 组装 summary：优先取三段概览块
-        summary_parts = []
-        summary_heads = ['Thematic opportunities', 'Market backdrop', 'Week ahead']
-        for head in summary_heads:
-            if head in kept:
-                i = kept.index(head)
-                block = [head]
-                if i + 1 < len(kept):
-                    block.append(kept[i + 1])
-                summary_parts.append('\n'.join(block))
-        description = '\n\n'.join(summary_parts).strip()
-
-        # content 保留 summary + 正文整体结构到截断点
-        content_lines = []
-        skip_exact_prefixes = (
-            'Weekly video_', 'Title slide:', 'URL Source:', 'Markdown Content:',
-            '1: ', '2: ', '3: ', 'Outro:'
-        )
-        skip_exact = {
-            title,
-            'Weekly market commentary',
-            'BlackRock Investment Institute',
-            'Christopher Kaminker',
-            'Head of Sustainable Investment Research and Analytics',
-        }
-        skip_contains = [
-            'To view this video', 'Video Player is loading', 'Current Time 0:00', 'Loaded: 0%',
-            'Opening frame:', 'Camera frame', 'Closing frame:', 'Read details: blackrock.com/weekly-commentary'
-        ]
-        for ln in kept:
-            if ln in skip_exact:
-                continue
-            if ln.startswith(skip_exact_prefixes):
-                continue
-            if any(x in ln for x in skip_contains):
-                continue
-            content_lines.append(ln)
-
-        # 正文尽量从 summary 概览块开始，而不是 transcript teaser 开始
-        preferred_start = None
-        for marker in ['Thematic opportunities', 'The economic shock emanating from the Middle East conflict']:
-            if marker in content_lines:
-                preferred_start = content_lines.index(marker)
-                break
-        if preferred_start is not None:
-            content_lines = content_lines[preferred_start:]
-
-        cleaned_lines = []
-        pending_images = []
-        for ln in content_lines:
-            # 去 markdown 标题，但保留图片（后续转成 <img>）
-            ln = re.sub(r'^#+\s*', '', ln).strip()
-            # 图片先暂存，避免被紧随其后的脚注截断误伤
-            if re.match(r'^!\[[^\]]*\]\([^\)]+\)$', ln):
-                pending_images.append(ln)
-                continue
-            # 去脚注/来源/日历尾巴；截断前先把紧邻图片补回
-            if ln.startswith('Past performance is not a reliable indicator') or ln.startswith('**Past performance is not a reliable indicator'):
-                cleaned_lines.extend(pending_images)
-                break
-            if ln.startswith('Sources:'):
-                cleaned_lines.extend(pending_images)
-                break
-            if re.match(r'^(March|April|May|June|July|August|September|October|November|December|January|February)\s+\d{1,2}$', ln):
-                cleaned_lines.extend(pending_images)
-                break
-            if pending_images:
-                cleaned_lines.extend(pending_images)
-                pending_images = []
-            cleaned_lines.append(ln)
-
-        def render_line(line: str) -> str:
-            m = re.match(r'^!\[([^\]]*)\]\(([^\)]+)\)$', line)
-            if m:
-                alt = html.escape(m.group(1).strip())
-                src = html.escape(m.group(2).strip())
-                return f'<p><img src="{src}" alt="{alt}" /></p>'
-            return f'<p>{html.escape(line)}</p>'
-
-        content_lines = cleaned_lines
-
-        content_lines = cleaned_lines
-
-        # 用 description 的首段做摘要回填；正文里仍保留 summary + 正文
-        if not description:
-            for ln in content_lines[:8]:
-                if len(ln) > 80:
-                    description = ln
-                    break
-
-        if not content_lines:
+        if not content_parts:
             raise ValueError('blackrock_weekly content empty')
 
-        content_html = ''.join(render_line(x) for x in content_lines)
-        if body_image_urls:
-            image_blocks = ''.join(
-                f'<p><img src="{html.escape(src)}" alt="BlackRock commentary image" /></p>'
-                for src in body_image_urls
-                if src not in content_html
-            )
-            content_html = image_blocks + content_html
+        content_html = ''.join(content_parts)
         if pdf_link:
             content_html = re.sub(
                 r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\"\s<]+\.pdf',
                 pdf_link,
                 content_html,
             )
+        if not description:
+            description = title
         guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
         return {
             'title': title,
@@ -864,11 +782,9 @@ class WebToRSS:
                 link=item['link'],
                 description=item['description'],
                 pub_date=pub_date,
-                guid=item['guid']
+                guid=item['guid'],
+                content_html=item['content_html']
             )
-            rss_item = builder.channel.findall('item')[0]
-            content_elem = ET.SubElement(rss_item, '{http://purl.org/rss/1.0/modules/content/}encoded')
-            content_elem.text = html.unescape(item['content_html'])
             xml = builder.to_xml()
             out_file = self.config.get("output_file")
             if out_file:
