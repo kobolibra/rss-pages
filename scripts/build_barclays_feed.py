@@ -50,23 +50,24 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     rss = Element('rss', version='2.0')
     channel = SubElement(rss, 'channel')
     SubElement(channel, 'title').text = TITLE
-    SubElement(channel, 'link').text = URL
+    SubElement(channel, 'link').text = f"{public_base.rstrip('/')}/barclays_weekly_insights.xml"
     SubElement(channel, 'description').text = DESCRIPTION
     SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'
 
     slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower() or 'barclays-weekly'
-    item_url = URL
+    item_url = f"{public_base.rstrip('/')}/item/barclays_weekly_insights/{slug}/"
 
     item = SubElement(channel, 'item')
     SubElement(item, 'title').text = title
     SubElement(item, 'link').text = item_url
     guid = SubElement(item, 'guid')
-    guid.set('isPermaLink', 'false')
-    import hashlib
-    guid.text = hashlib.md5(f'{item_url}|{title}'.encode('utf-8')).hexdigest()
+    guid.set('isPermaLink', 'true')
+    guid.text = item_url
     SubElement(item, 'pubDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
-    SubElement(item, 'description').text = content_html
+    SubElement(item, 'description').text = desc
+    content = SubElement(item, QName(CONTENT_NS, 'encoded'))
+    content.text = content_html
 
     return minidom.parseString(ET.tostring(rss, encoding='utf-8')).toprettyxml(indent='  ', encoding='utf-8')
 

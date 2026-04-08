@@ -21,5 +21,5 @@ This bundle contains the first-pass GitHub Pages static RSS setup.
    `https://<user>.github.io/<repo>/`
 
 ## Notes
-- Yardeni also generates static item pages under `/item/yardeni_morning_briefing/<slug>/`.
+- All live feeds are intended to be rewritten to static local item pages under `/item/<feed_name>/<slug>/` so readers like Readwise do not need to follow upstream article links.
 - This bundle intentionally excludes FetchRSS BlackRock and MCP.

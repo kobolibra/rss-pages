@@ -56,14 +56,12 @@ jobs:
         run: |
           cp feeds/output/*.xml site/
 
-      - name: Rewrite local item feeds for readers
+      - name: Rewrite feeds to local item pages for readers
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
-          # 每次工作日定时更新都直接重建，避免 blackrock/barclays 长期停留在旧值
-          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "yardeni_morning_briefing"
-          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "blackrock_weekly_commentary"
+          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary_diffbot,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
 
       - name: Add index page
