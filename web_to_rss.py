@@ -412,6 +412,7 @@ class WebToRSS:
         description = (meta_summary.get('content') or '').strip() if meta_summary else ''
 
         hero_bullets = []
+        hero_titles_seen = set()
         for bullet in soup.select('div.key-points div.bullet'):
             title_el = bullet.select_one('div.bullet-title span')
             body_el = bullet.select_one('div.bullet-summary p')
@@ -419,6 +420,8 @@ class WebToRSS:
             bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
             if btitle or bbody:
                 hero_bullets.append((btitle, bbody))
+                if btitle:
+                    hero_titles_seen.add(btitle.lower())
 
         intro_text = ''
         download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
@@ -449,11 +452,11 @@ class WebToRSS:
 
         seen_norm = set()
 
-        def _push_html(block_html: str, text_for_key: str = ''):
+        def _push_html(block_html: str, text_for_key: str = '', force: bool = False):
             key = re.sub(r'\s+', ' ', html.unescape(text_for_key or block_html)).strip().lower()
             if not key:
                 return
-            if key in seen_norm:
+            if (not force) and key in seen_norm:
                 return
             seen_norm.add(key)
             content_parts.append(block_html)
@@ -520,7 +523,8 @@ class WebToRSS:
                     if text.startswith('Past performance is not a reliable indicator'):
                         continue
                     if elem.name == 'h2':
-                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text)
+                        force_heading = text.lower() in hero_titles_seen
+                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=force_heading)
                     else:
                         if not description and len(text) > 120:
                             description = text
