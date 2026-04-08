@@ -413,6 +413,7 @@ class WebToRSS:
 
         hero_bullets = []
         hero_titles_seen = set()
+        week_ahead_seen_in_hero = False
         for bullet in soup.select('div.key-points div.bullet'):
             title_el = bullet.select_one('div.bullet-title span')
             body_el = bullet.select_one('div.bullet-summary p')
@@ -422,6 +423,8 @@ class WebToRSS:
                 hero_bullets.append((btitle, bbody))
                 if btitle:
                     hero_titles_seen.add(btitle.lower())
+                    if btitle.lower() == 'week ahead':
+                        week_ahead_seen_in_hero = True
 
         intro_text = ''
         download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
@@ -441,7 +444,7 @@ class WebToRSS:
 
         seed_blocks = []
         seed_blocks.append((f'<p><strong>{html.escape(title)}</strong></p>', title))
-        for bullet_title, bullet_text in hero_bullets:
+        for bullet_title, bullet_text in hero_bullets[:3]:
             if bullet_title:
                 seed_blocks.append((f'<p><strong>{html.escape(bullet_title)}</strong></p>', bullet_title))
             if bullet_text:
@@ -546,6 +549,7 @@ class WebToRSS:
                     heading_text = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if heading_text:
                         local_blocks.append((f'<p><strong>{html.escape(heading_text)}</strong></p>', heading_text, heading_text.lower() in hero_titles_seen))
+                seen_local_week_items = set()
                 for elem in sib.find_all(['span', 'p']):
                     classes = ' '.join(elem.get('class') or [])
                     if 'fa ' in classes or classes.startswith('fa') or 'pseudo-mask' in classes:
@@ -559,6 +563,11 @@ class WebToRSS:
                         continue
                     if text.startswith('Past performance is not a reliable indicator'):
                         continue
+                    if heading_text.lower() == 'week ahead' and week_ahead_seen_in_hero:
+                        if re.fullmatch(r'April\s+\d{1,2}(?:-\d{1,2})?', text) or ';' in text or 'U.S.' in text or 'China ' in text:
+                            if text in seen_local_week_items:
+                                continue
+                            seen_local_week_items.add(text)
                     local_blocks.append((f'<p>{html.escape(text)}</p>', text, False))
                 if heading_text.lower() == 'week ahead':
                     deferred_blocks.extend(local_blocks)
