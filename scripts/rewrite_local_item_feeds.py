@@ -125,7 +125,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
         content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html
         full_text = html_to_text(content_html)
-        if len(full_text) > len(desc or ""):
+        if feed_name != "blackrock_weekly_commentary" and len(full_text) > len(desc or ""):
             desc = full_text
         slug = slugify_from_link_or_title(link or guid, title)
         local_url = f"{public_base.rstrip('/')}/item/{feed_name}/{slug}/"
