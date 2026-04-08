@@ -436,14 +436,30 @@ class WebToRSS:
                     intro_text = text
                     break
 
+        seed_blocks = []
         for btitle, bbody in hero_bullets:
             if btitle:
-                content_parts.append(f'<p><strong>{html.escape(btitle)}</strong></p>')
+                seed_blocks.append((f'<p><strong>{html.escape(btitle)}</strong></p>', btitle))
             if bbody:
-                content_parts.append(f'<p>{html.escape(bbody)}</p>')
+                seed_blocks.append((f'<p>{html.escape(bbody)}</p>', bbody))
         if intro_text:
-            content_parts.append(f'<p>{html.escape(intro_text)}</p>')
+            seed_blocks.append((f'<p>{html.escape(intro_text)}</p>', intro_text))
             description = intro_text
+
+        seen_norm = set()
+
+        def _push_html(block_html: str, text_for_key: str = ''):
+            key = re.sub(r'\s+', ' ', html.unescape(text_for_key or block_html)).strip().lower()
+            if not key:
+                return
+            if key in seen_norm:
+                return
+            seen_norm.add(key)
+            content_parts.append(block_html)
+
+        content_parts = []
+        for block_html, key in seed_blocks:
+            _push_html(block_html, key)
 
         def _is_chart_label(elem, text: str) -> bool:
             if elem.name != 'p':
@@ -463,7 +479,7 @@ class WebToRSS:
                 return
             if src.startswith('/'):
                 src = 'https://www.blackrock.com' + src
-            content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
+            _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
 
         for sib in siblings:
             comp = sib.find(attrs={'data-componentname': True})
@@ -494,38 +510,20 @@ class WebToRSS:
                     if text.startswith('Past performance is not a reliable indicator'):
                         continue
                     if elem.name == 'h2':
-                        content_parts.append(f'<p><strong>{html.escape(text)}</strong></p>')
+                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text)
                     else:
                         if not description and len(text) > 120:
                             description = text
-                        content_parts.append(f'<p>{html.escape(text)}</p>')
+                        _push_html(f'<p>{html.escape(text)}</p>', text)
             elif comp_name.lower() == 'image':
                 _append_image(sib.find('img'))
                 heading = sib.find('h2')
                 if heading:
                     htxt = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
                     if htxt:
-                        content_parts.append(f'<p><strong>{html.escape(htxt)}</strong></p>')
-                for p in sib.find_all('p'):
-                    if 'footnotes' in ((p.get('class') or [])):
-                        continue
-                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
-                    if not text:
-                        continue
-                    if text.startswith('Past performance is not a reliable indicator'):
-                        continue
-                    if text.startswith('Source:') or text.startswith('Sources:'):
-                        continue
-                    content_parts.append(f'<p>{html.escape(text)}</p>')
-                for bullet in sib.select('div.bullet'):
-                    title_el = bullet.select_one('div.bullet-title span')
-                    body_el = bullet.select_one('div.bullet-summary p')
-                    btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
-                    bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
-                    if btitle:
-                        content_parts.append(f'<p>{html.escape(btitle)}</p>')
-                    if bbody:
-                        content_parts.append(f'<p>{html.escape(bbody)}</p>')
+                        _push_html(f'<p><strong>{html.escape(htxt)}</strong></p>', htxt)
+                # Image blocks on BlackRock often contain repeated date/event helper text or footnotes.
+                # Keep the image + heading only; the concise hero bullets already capture Market backdrop / Week ahead.
 
         if not content_parts:
             raise ValueError('blackrock_weekly content empty')
