@@ -81,6 +81,26 @@ def get_content_encoded(el) -> str:
     return "".join(parts).strip()
 
 
+def sanitize_feed_html(feed_name: str, value: str) -> str:
+    if not value:
+        return ""
+    if feed_name == "trivium_finance_regs":
+        value = re.sub(
+            r"<p>\s*The post\s+.*?\s+appeared first on\s+.*?</p>",
+            "",
+            value,
+            flags=re.I | re.S,
+        )
+        value = re.sub(
+            r"The post\s+.*?\s+appeared first on\s+.*?\.",
+            "",
+            value,
+            flags=re.I | re.S,
+        )
+        value = re.sub(r"\n\s*\n+", "\n", value).strip()
+    return value
+
+
 def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: str):
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -98,11 +118,11 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
     for item in channel.findall("item"):
         title = get_text(item, "title")
         link = get_text(item, "link")
-        desc = get_text(item, "description")
+        desc = sanitize_feed_html(feed_name, get_text(item, "description"))
         guid = get_text(item, "guid")
         pub_date = get_text(item, "pubDate")
         author = get_text(item, "author")
-        source_content_html = get_content_encoded(item) or desc
+        source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
         content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html
         full_text = html_to_text(content_html)
         if len(full_text) > len(desc or ""):
