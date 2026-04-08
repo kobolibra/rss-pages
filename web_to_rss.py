@@ -20,6 +20,7 @@ import html
 
 import requests
 import yaml
+from bs4 import BeautifulSoup
 
 
 class TemplateEngine:
@@ -326,24 +327,26 @@ class WebToRSS:
         if not title:
             raise ValueError('blackrock_weekly title not found')
 
-        energy_img_url = ''
+        body_image_urls: List[str] = []
         try:
             raw_html = requests.get(
                 self.config['source']['url'],
                 headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
                 timeout=30,
             ).text
-            m_energy = re.search(
-                r'Energy dependencies.*?<img[^>]+data-src="([^"]*chart-of-the-week-[^"]+\.svg)"',
-                raw_html,
-                re.I | re.S,
-            )
-            if m_energy:
-                energy_img_url = m_energy.group(1).strip()
-                if energy_img_url.startswith('/'):
-                    energy_img_url = 'https://www.blackrock.com' + energy_img_url
+            m_tab0 = re.search(r'<div\s+data-tab-id="0">.*?</div>(.*?)(?:<div\s+data-tab-id="1">|<!--\s*COMPONENT:.*?Asset class views)', raw_html, re.I | re.S)
+            body_html = m_tab0.group(1) if m_tab0 else raw_html
+            seen_imgs = set()
+            for src in re.findall(r'<img[^>]+(?:data-src|src)="([^"]+\.(?:svg|png|jpg|jpeg|webp))"', body_html, re.I):
+                src = src.strip()
+                if src.startswith('/'):
+                    src = 'https://www.blackrock.com' + src
+                if src in seen_imgs:
+                    continue
+                seen_imgs.add(src)
+                body_image_urls.append(src)
         except Exception:
-            energy_img_url = ''
+            body_image_urls = []
 
         pdf_link = ''
         if video_compact:
@@ -509,9 +512,13 @@ class WebToRSS:
             raise ValueError('blackrock_weekly content empty')
 
         content_html = ''.join(render_line(x) for x in content_lines)
-        if energy_img_url and energy_img_url not in content_html:
-            energy_block = f'<p><img src="{html.escape(energy_img_url)}" alt="Energy dependencies" /></p>'
-            content_html = energy_block + content_html
+        if body_image_urls:
+            image_blocks = ''.join(
+                f'<p><img src="{html.escape(src)}" alt="BlackRock commentary image" /></p>'
+                for src in body_image_urls
+                if src not in content_html
+            )
+            content_html = image_blocks + content_html
         if pdf_link:
             content_html = re.sub(
                 r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\"\s<]+\.pdf',
