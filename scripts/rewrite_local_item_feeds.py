@@ -131,9 +131,9 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         pub_date = get_text(item, "pubDate")
         author = get_text(item, "author")
         source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
-        if feed_name in {"pitchbook_reports", "carlyle_insights"}:
-            # 这两类 feed 需要让阅读器优先根据原始 link 回源抓正文；
-            # 不再把 listing summary 伪装成 content:encoded 正文。
+        if feed_name in {"pitchbook_reports", "carlyle_insights", "blackrock_weekly_commentary"}:
+            # 这些 feed 需要让阅读器优先根据链接抓正文；
+            # 不再把摘要/正文重复塞进 content:encoded。
             content_html = ""
         else:
             content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html

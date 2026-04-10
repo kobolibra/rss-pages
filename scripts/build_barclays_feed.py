@@ -104,8 +104,6 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     guid.text = item_url
     SubElement(item, 'pubDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(item, 'description').text = desc
-    content = SubElement(item, QName(CONTENT_NS, 'encoded'))
-    content.text = content_html
 
     return minidom.parseString(ET.tostring(rss, encoding='utf-8')).toprettyxml(indent='  ', encoding='utf-8')
 
