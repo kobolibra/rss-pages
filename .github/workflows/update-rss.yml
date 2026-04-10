@@ -63,6 +63,12 @@ jobs:
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
 
+      - name: Preserve unchanged Barclays / BlackRock outputs
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights"
+
       - name: Validate generated feeds (restore last known-good on regression)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
