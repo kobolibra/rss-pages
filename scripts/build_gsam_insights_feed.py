@@ -180,20 +180,26 @@ def extract_article_data(page_json: dict) -> dict:
                 if rich:
                     body_parts.append(rich)
                 plist = value.get("paragraphList") or []
-                if plist:
-                    body_parts.append("<ul>")
-                    for entry in plist:
-                        if not isinstance(entry, dict):
-                            continue
-                        etitle = (entry.get("title") or "").strip()
-                        edesc = clean_html_fragment(entry.get("description", ""))
-                        if etitle and edesc:
-                            body_parts.append(f"<li><strong>{html.escape(etitle)}</strong> — {edesc}</li>")
-                        elif etitle:
-                            body_parts.append(f"<li><strong>{html.escape(etitle)}</strong></li>")
-                        elif edesc:
-                            body_parts.append(f"<li>{edesc}</li>")
-                    body_parts.append("</ul>")
+                for entry in plist:
+                    if not isinstance(entry, dict):
+                        continue
+                    ptitle = (entry.get("paragraphTitle") or entry.get("title") or "").strip()
+                    ptext = clean_html_fragment(entry.get("paragraphText", ""))
+                    pimg_html = ""
+                    if isinstance(entry.get("fileReference"), dict):
+                        pimg_html = render_image_html({
+                            "path": entry["fileReference"].get("path"),
+                            "alt": ptitle,
+                            "title": ptitle,
+                        }, fallback_title=ptitle)
+                    body_parts.append('<div class="paragraph-card">')
+                    if pimg_html:
+                        body_parts.append(pimg_html)
+                    if ptitle:
+                        body_parts.append(f"<h3>{html.escape(ptitle)}</h3>")
+                    if ptext:
+                        body_parts.append(ptext)
+                    body_parts.append('</div>')
                 continue
 
             if component_name == "quote" and value.get("text"):
@@ -298,6 +304,9 @@ def build_item_page(item: dict, page_url: str, article: dict) -> str:
     figcaption {{ color:#555; font-size:.92rem; margin-top:.55rem; }}
     blockquote {{ border-left:4px solid #ddd; margin:1.4rem 0; padding:.2rem 0 .2rem 1rem; color:#333; }}
     ul {{ padding-left:1.3rem; }}
+    .paragraph-card {{ margin:1.2rem 0 1.8rem; }}
+    .paragraph-card figure {{ margin:.6rem 0; max-width:72px; }}
+    .paragraph-card h3 {{ margin:.4rem 0 .45rem; font-size:1.08rem; }}
     a {{ color:#0b57d0; }}
   </style>
 </head>
