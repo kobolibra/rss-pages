@@ -1,4 +1,6 @@
+import csv
 import html
+import io
 import json
 import re
 import sys
@@ -93,8 +95,103 @@ def decode_vue_content(raw: str) -> str:
     s = re.sub(r'<PageFootnoteReference[^>]*title="([^"]+)"[^>]*>.*?</PageFootnoteReference>', lambda m: f'<sup>[Footnote: {html.escape(html.unescape(m.group(1)))}]</sup>', s)
     s = re.sub(r'<vue-glossary-item[^>]*>(.*?)</vue-glossary-item>', r'\1', s)
     s = re.sub(r'</?vue-[^>]+>', '', s)
-    s = s.replace('\u200B', '').replace('\ufeff', '')
+    s = s.replace('\u200B', '').replace('\u0000', '').replace('\u001f', '')
     return s
+
+
+def extract_chart_models_from_page(page: str) -> list[dict]:
+    decoded_page = html.unescape(page)
+    charts = []
+    marker = 'vue-everviz-charts :model=\\u0022'
+    pos = 0
+    while True:
+        idx = decoded_page.find(marker, pos)
+        if idx == -1:
+            break
+        raw = decoded_page[idx + len(marker):]
+        try:
+            s = raw.encode('utf-8').decode('unicode_escape')
+            s = html.unescape(s)
+        except Exception:
+            pos = idx + len(marker)
+            continue
+        start = s.find('{')
+        if start == -1:
+            pos = idx + len(marker)
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        end = None
+        for i, ch in enumerate(s[start:], start):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == '\\':
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+        if end is not None:
+            try:
+                charts.append(json.loads(s[start:end]))
+            except Exception:
+                pass
+        pos = idx + len(marker)
+    return charts
+
+
+def render_chart_tables(page: str) -> str:
+    charts = extract_chart_models_from_page(page)
+    parts = []
+    for chart in charts:
+        data = chart.get('data', {})
+        csv_text = (((data.get('data') or {}).get('csv')) or '').strip()
+        if not csv_text:
+            continue
+        title = clean_text(BeautifulSoup((data.get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True))
+        credits = clean_text((data.get('credits') or {}).get('text') or '')
+        y_axes = data.get('yAxis') or []
+        axis_labels = []
+        if isinstance(y_axes, list):
+            for axis in y_axes[:3]:
+                label = clean_text(BeautifulSoup(((axis or {}).get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True))
+                if label:
+                    axis_labels.append(label)
+        rows = list(csv.reader(io.StringIO(csv_text), delimiter='\t'))
+        if not rows:
+            continue
+        header = rows[0]
+        data_rows = rows[1:]
+        parts.append('<section class="chart-table">')
+        if title:
+            parts.append(f'<h2>{html.escape(title)}</h2>')
+        parts.append('<div class="chart-fallback-note">Chart data table</div>')
+        if axis_labels:
+            parts.append(f'<div class="chart-meta">Axes: {html.escape(" / ".join(axis_labels))}</div>')
+        parts.append('<table><thead><tr>')
+        for col in header:
+            parts.append(f'<th>{html.escape(col)}</th>')
+        parts.append('</tr></thead><tbody>')
+        for row in data_rows:
+            parts.append('<tr>')
+            for col in row:
+                parts.append(f'<td>{html.escape(col)}</td>')
+            parts.append('</tr>')
+        parts.append('</tbody></table>')
+        if credits:
+            parts.append(f'<div class="chart-meta">Source: {html.escape(credits)}</div>')
+        parts.append('</section>')
+    return ''.join(parts)
 
 
 def detail_content(url: str) -> dict:
@@ -105,9 +202,12 @@ def detail_content(url: str) -> dict:
     if header_match:
         header = json.loads(html.unescape(header_match.group(1)))
 
-    blocks = re.findall(r'Blocks\.Html\.Blocks\.HtmlBlock[\s\S]{0,5000}?&quot;content&quot;:&quot;([\s\S]*?)&quot;,&quot;productBuyingProcessPageProps&quot;', page)
+    blocks = re.findall(r'Blocks\.Html\.Blocks\.HtmlBlock[\s\S]*?&quot;content&quot;:&quot;([\s\S]*?)&quot;,&quot;productBuyingProcessPageProps&quot;', page)
     html_blocks = [decode_vue_content(b) for b in blocks]
     body_html = "\n".join([b for b in html_blocks if b.strip()])
+    chart_tables_html = render_chart_tables(page)
+    if chart_tables_html:
+        body_html += "\n" + chart_tables_html
 
     article_header = header.get('articleHeaderProps', {}) if isinstance(header, dict) else {}
     intro = decode_vue_content(article_header.get('introText', '') or '')
@@ -149,7 +249,7 @@ def build_item_page(item: dict, detail: dict) -> str:
   <title>{html.escape(title)}</title>
   <link rel=\"canonical\" href=\"{html.escape(item['url'])}\">
   <style>
-    body {{ font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; }}
+    body {{ font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:900px; margin:40px auto; padding:0 18px; line-height:1.7; }}
     article {{ width:100%; }}
     h1 {{ line-height:1.15; margin:0 0 14px; font-size:2.2rem; }}
     h2 {{ margin-top:2rem; line-height:1.25; }}
@@ -158,6 +258,11 @@ def build_item_page(item: dict, detail: dict) -> str:
     figure {{ margin:1.4rem 0; }}
     p, ul, ol {{ margin:1rem 0; }}
     sup {{ font-size:.8em; color:#555; }}
+    table {{ width:100%; border-collapse:collapse; margin:1rem 0 1.4rem; font-size:.92rem; }}
+    th, td {{ border:1px solid #ddd; padding:6px 8px; text-align:right; }}
+    th:first-child, td:first-child {{ text-align:left; }}
+    .chart-table {{ margin:2rem 0; padding:1rem 0; }}
+    .chart-fallback-note, .chart-meta {{ color:#555; font-size:.92rem; margin:.5rem 0; }}
     a {{ color:#0b57d0; }}
   </style>
 </head>
@@ -211,7 +316,6 @@ if __name__ == '__main__':
     items = list_items()
     selected = []
     for item in items:
-        # 用户给的是 CIO archive；排除混入的 the-world/geopolitics
         if '/en-us/insights/cio-view/' not in item['url']:
             continue
         selected.append(item)
