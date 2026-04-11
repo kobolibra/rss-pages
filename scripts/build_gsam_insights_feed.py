@@ -13,7 +13,7 @@ import requests
 
 LIST_URL = "https://am.gs.com/services/search-engine/en-us/institutions/search/insights?q=&hitsPerPage=50&insightType=article,report-survey"
 SITE_BASE = "https://am.gs.com"
-FEED_NAME = "gsam_insights"
+FEED_NAME = "gsam"
 FEED_TITLE = "Goldman Sachs Asset Management Insights"
 FEED_DESC = "GSAM insights feed built from the official search JSON and rewritten to local item pages for better reader compatibility."
 UA = "Mozilla/5.0"
