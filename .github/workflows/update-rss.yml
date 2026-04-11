@@ -60,6 +60,11 @@ jobs:
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
+          if [ ! -f site/trivium_finance_regs.xml ]; then
+            echo "trivium_finance_regs.xml missing before rewrite; restoring from live Pages"
+            python scripts/restore_live_pages_feed.py "$BASE_URL" site "trivium_finance_regs"
+          fi
+
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
           python scripts/build_barclays_feed.py site "$BASE_URL"
           python scripts/build_gsam_insights_feed.py site "$BASE_URL"
