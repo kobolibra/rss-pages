@@ -55,171 +55,262 @@ def fetch_next_json(page_url: str) -> dict:
     return json.loads(m.group(1))
 
 
-def clean_html_fragment(fragment: str) -> str:
-    fragment = fragment or ""
-    fragment = fragment.replace("\r", "").strip()
-    return fragment
+def clean_html_fragment(fragment) -> str:
+    if fragment is None:
+        return ""
+    if not isinstance(fragment, str):
+        return ""
+    return fragment.replace("\r", "").strip()
 
 
-def extract_article_html(page_json: dict) -> tuple[str, str, list[dict], list[dict], str]:
+def asset_url(path: str) -> str:
+    return urljoin(SITE_BASE, path or "") if path else ""
+
+
+def render_image_html(image: dict, fallback_title: str = "") -> str:
+    if not isinstance(image, dict):
+        return ""
+
+    file_ref = image.get("fileReference") if isinstance(image.get("fileReference"), dict) else image
+    path = file_ref.get("path") if isinstance(file_ref, dict) else image.get("path")
+    src = asset_url(path or "")
+    if not src:
+        return ""
+
+    alt = image.get("alt") or image.get("title") or fallback_title or ""
+    title = image.get("title") or ""
+    source = clean_html_fragment(image.get("source", ""))
+
+    caption_parts = []
+    if title:
+        caption_parts.append(f"<strong>{html.escape(title)}</strong>")
+    if source:
+        caption_parts.append(source)
+    figcaption = ""
+    if caption_parts:
+        figcaption = f"<figcaption>{'<br/>'.join(caption_parts)}</figcaption>"
+
+    return (
+        f"<figure><img src=\"{html.escape(src)}\" alt=\"{html.escape(alt)}\" loading=\"lazy\" />"
+        f"{figcaption}</figure>"
+    )
+
+
+def normalize_authors(raw_authors) -> list[dict]:
+    if isinstance(raw_authors, dict):
+        return [raw_authors]
+    if isinstance(raw_authors, list):
+        return [x for x in raw_authors if isinstance(x, dict)]
+    return []
+
+
+def author_name(author: dict) -> str:
+    if not isinstance(author, dict):
+        return ""
+    person_ref = author.get("personReferencePath") if isinstance(author.get("personReferencePath"), dict) else {}
+    meta = person_ref.get("metadata") if isinstance(person_ref.get("metadata"), dict) else {}
+    raw_title = meta.get("title")
+    if isinstance(raw_title, str) and raw_title.strip():
+        return raw_title.strip()
+    first_name = meta.get("firstName") or ""
+    last_name = meta.get("lastName") or ""
+    if first_name or last_name:
+        return f"{first_name} {last_name}".strip()
+    fallback_title = author.get("title") if isinstance(author.get("title"), str) else ""
+    fallback_name = author.get("name") if isinstance(author.get("name"), str) else ""
+    return fallback_title or fallback_name or ""
+
+
+def author_job(author: dict) -> str:
+    if not isinstance(author, dict):
+        return ""
+    person_ref = author.get("personReferencePath") if isinstance(author.get("personReferencePath"), dict) else {}
+    meta = person_ref.get("metadata") if isinstance(person_ref.get("metadata"), dict) else {}
+    return meta.get("jobTitle") if isinstance(meta.get("jobTitle"), str) else ""
+
+
+def extract_article_data(page_json: dict) -> dict:
     page_props = ((page_json or {}).get("props") or {}).get("pageProps") or {}
     data = page_props.get("data") or {}
     props = data.get("properties") or {}
     items = data.get("items") or {}
 
     summary = props.get("summaryDescription") or props.get("summaryTeaserText") or props.get("socialDescription") or ""
-    raw_key_takeaways = props.get("keyTakeaways") or []
-    key_takeaways = [x for x in raw_key_takeaways if isinstance(x, dict)]
-    raw_authors = props.get("authorDetails") or []
-    if isinstance(raw_authors, dict):
-        authors = [raw_authors]
-    elif isinstance(raw_authors, list):
-        authors = [x for x in raw_authors if isinstance(x, dict)]
-    else:
-        authors = []
-    read_meta = ""
-    if props.get("summaryDisplaydate"):
-        read_meta = props.get("summaryDisplaydate")
+    key_takeaways = [x for x in (props.get("keyTakeaways") or []) if isinstance(x, dict)]
+    authors = normalize_authors(props.get("authorDetails") or [])
+    display_date = props.get("summaryDisplaydate") or ""
+    read_time = props.get("readTime") or ""
 
-    html_parts = []
+    hero = props.get("heroImageLarge") or props.get("heroImage") or props.get("heroImageBeyondLarge") or props.get("heroImageSmall") or {}
+    hero_image_html = ""
+    if isinstance(hero, dict) and hero.get("path"):
+        hero_image_html = render_image_html({"path": hero.get("path"), "alt": props.get("title") or props.get("summaryTitle") or ""})
 
-    main_text = items.get("text") if isinstance(items, dict) else None
-    if isinstance(main_text, dict) and main_text.get("text"):
-        html_parts.append(clean_html_fragment(main_text.get("text", "")))
+    body_parts: list[str] = []
 
     if isinstance(items, dict):
         for key, value in items.items():
-            if key == "text" or not isinstance(value, dict):
+            if not isinstance(value, dict):
                 continue
+
             vtype = value.get("type") or ""
+            component_name = str(vtype).split("/")[-1]
             title = (value.get("title") or "").strip()
 
-            if vtype == "text" and value.get("text"):
-                if title:
-                    html_parts.append(f"<h2>{html.escape(title)}</h2>")
-                html_parts.append(clean_html_fragment(value.get("text", "")))
-                continue
-
-            if vtype == "paragraphlist":
-                if title:
-                    html_parts.append(f"<h2>{html.escape(title)}</h2>")
+            if value.get("images") and isinstance(value.get("images"), list):
+                for img in value.get("images") or []:
+                    img_html = render_image_html(img, fallback_title=title)
+                    if img_html:
+                        body_parts.append(img_html)
                 rich = clean_html_fragment(value.get("richText", ""))
                 if rich:
-                    html_parts.append(rich)
+                    body_parts.append(rich)
+                continue
+
+            if component_name == "text" and value.get("text"):
+                if title:
+                    body_parts.append(f"<h2>{html.escape(title)}</h2>")
+                body_parts.append(clean_html_fragment(value.get("text", "")))
+                continue
+
+            if component_name == "paragraphlist":
+                if title:
+                    body_parts.append(f"<h2>{html.escape(title)}</h2>")
+                rich = clean_html_fragment(value.get("richText", ""))
+                if rich:
+                    body_parts.append(rich)
                 plist = value.get("paragraphList") or []
                 if plist:
-                    html_parts.append("<ul>")
+                    body_parts.append("<ul>")
                     for entry in plist:
-                        etitle = (entry or {}).get("title", "").strip()
-                        edesc = clean_html_fragment((entry or {}).get("description", ""))
+                        if not isinstance(entry, dict):
+                            continue
+                        etitle = (entry.get("title") or "").strip()
+                        edesc = clean_html_fragment(entry.get("description", ""))
                         if etitle and edesc:
-                            html_parts.append(f"<li><strong>{html.escape(etitle)}</strong> — {edesc}</li>")
+                            body_parts.append(f"<li><strong>{html.escape(etitle)}</strong> — {edesc}</li>")
                         elif etitle:
-                            html_parts.append(f"<li><strong>{html.escape(etitle)}</strong></li>")
+                            body_parts.append(f"<li><strong>{html.escape(etitle)}</strong></li>")
                         elif edesc:
-                            html_parts.append(f"<li>{edesc}</li>")
-                    html_parts.append("</ul>")
+                            body_parts.append(f"<li>{edesc}</li>")
+                    body_parts.append("</ul>")
                 continue
 
-            if title and vtype in {"horizontaltab", "quote", "inlinevideo", "promotionalblock"}:
-                html_parts.append(f"<h2>{html.escape(title)}</h2>")
-                for text_key in ["introduction", "description", "text", "richText"]:
-                    frag = clean_html_fragment(value.get(text_key, ""))
-                    if frag:
-                        html_parts.append(frag)
-                if vtype == "horizontaltab":
-                    tab_items = value.get("items") or []
-                    for tab in tab_items:
-                        tab_title = (tab or {}).get("title", "").strip()
-                        tab_intro = clean_html_fragment((tab or {}).get("introduction", ""))
-                        tab_rich = clean_html_fragment((tab or {}).get("richText", ""))
-                        if tab_title:
-                            html_parts.append(f"<h3>{html.escape(tab_title)}</h3>")
-                        if tab_intro:
-                            html_parts.append(tab_intro)
-                        if tab_rich:
-                            html_parts.append(tab_rich)
+            if component_name == "quote" and value.get("text"):
+                body_parts.append(f"<blockquote>{clean_html_fragment(value.get('text', ''))}</blockquote>")
+                continue
 
-    full_html = "\n".join([part for part in html_parts if part.strip()])
-    return summary, full_html, key_takeaways, authors, read_meta
+            if component_name == "horizontaltab":
+                if title:
+                    body_parts.append(f"<h2>{html.escape(title)}</h2>")
+                intro = clean_html_fragment(value.get("introduction", ""))
+                rich = clean_html_fragment(value.get("richText", ""))
+                if intro:
+                    body_parts.append(intro)
+                if rich:
+                    body_parts.append(rich)
+                for tab in value.get("items") or []:
+                    if not isinstance(tab, dict):
+                        continue
+                    tab_title = (tab.get("title") or "").strip()
+                    tab_intro = clean_html_fragment(tab.get("introduction", ""))
+                    tab_rich = clean_html_fragment(tab.get("richText", ""))
+                    if tab_title:
+                        body_parts.append(f"<h3>{html.escape(tab_title)}</h3>")
+                    if tab_intro:
+                        body_parts.append(tab_intro)
+                    if tab_rich:
+                        body_parts.append(tab_rich)
+                continue
+
+    article_html = "\n".join(part for part in body_parts if part.strip())
+    return {
+        "summary": summary,
+        "key_takeaways": key_takeaways,
+        "authors": authors,
+        "display_date": display_date,
+        "read_time": str(read_time).strip(),
+        "hero_image_html": hero_image_html,
+        "article_html": article_html,
+    }
 
 
-def build_item_page(item: dict, page_url: str, article_html: str, summary: str, key_takeaways: list[dict], authors: list[dict], read_meta: str) -> str:
+def build_item_page(item: dict, page_url: str, article: dict) -> str:
     title = item.get("title") or item.get("summaryTitle") or "Item"
-    publish = item.get("publishDate") or ""
-    subtype = item.get("subType") or ""
-    theme = item.get("theme") or item.get("capability") or ""
+    summary = article.get("summary") or ""
+    display_date = article.get("display_date") or ""
+    read_time = article.get("read_time") or ""
+    hero_image_html = article.get("hero_image_html") or ""
+    article_html = article.get("article_html") or ""
+    key_takeaways = article.get("key_takeaways") or []
+    authors = article.get("authors") or []
 
-    parts = [f"<p>来源：<a href=\"{html.escape(page_url)}\">{html.escape(page_url)}</a></p>"]
-    meta_bits = []
-    if subtype:
-        meta_bits.append(f"类型：{html.escape(subtype)}")
-    if publish:
-        meta_bits.append(f"发布时间：{html.escape(publish)}")
-    if read_meta:
-        meta_bits.append(f"页面展示：{html.escape(read_meta)}")
-    if theme:
-        meta_bits.append(f"主题：{html.escape(str(theme))}")
-    if meta_bits:
-        parts.append(f"<p>{' ｜ '.join(meta_bits)}</p>")
+    meta_line_parts = []
+    if display_date:
+        meta_line_parts.append(html.escape(display_date))
+    if read_time:
+        meta_line_parts.append(f"{html.escape(read_time)} min read")
+    meta_line = " · ".join(meta_line_parts)
 
-    if authors:
-        parts.append("<h2>Author(s)</h2><ul>")
-        for a in authors:
-            if not isinstance(a, dict):
-                continue
-            person_ref = a.get("personReferencePath") or {}
-            if not isinstance(person_ref, dict):
-                continue
-            meta = person_ref.get("metadata") or {}
-            if not isinstance(meta, dict):
-                meta = {}
-            raw_title = meta.get("title")
-            if isinstance(raw_title, str) and raw_title.strip():
-                name = raw_title.strip()
-            else:
-                first_name = meta.get("firstName") or ""
-                last_name = meta.get("lastName") or ""
-                fallback_title = a.get("title") if isinstance(a.get("title"), str) else ""
-                fallback_name = a.get("name") if isinstance(a.get("name"), str) else ""
-                name = f"{first_name} {last_name}".strip() or fallback_title or fallback_name or ""
-            job = meta.get("jobTitle") if isinstance(meta.get("jobTitle"), str) else ""
-            if name and job:
-                parts.append(f"<li><strong>{html.escape(str(name))}</strong> — {html.escape(str(job))}</li>")
-            elif name:
-                parts.append(f"<li><strong>{html.escape(str(name))}</strong></li>")
-        parts.append("</ul>")
+    author_lines = []
+    for author in authors:
+        name = author_name(author)
+        job = author_job(author)
+        if name and job:
+            author_lines.append(f"<div>{html.escape(name)} — {html.escape(job)}</div>")
+        elif name:
+            author_lines.append(f"<div>{html.escape(name)}</div>")
 
-    if summary:
-        parts.append(f"<p><strong>摘要：</strong>{html.escape(summary)}</p>")
-
+    takeaways_html = ""
     if key_takeaways:
-        parts.append("<h2>Key Takeaways</h2><ul>")
+        bits = ["<section><h2>Key Takeaways</h2><ul>"]
         for kt in key_takeaways[:10]:
             kt_title = (kt or {}).get("title", "")
             kt_desc = (kt or {}).get("description", "")
-            bits = []
-            if kt_title:
-                bits.append(f"<strong>{html.escape(kt_title.strip())}</strong>")
-            if kt_desc:
-                bits.append(html.escape(re.sub(r'\s+', ' ', kt_desc).strip()))
-            if bits:
-                parts.append(f"<li>{' — '.join(bits)}</li>")
-        parts.append("</ul>")
-
-    if article_html:
-        parts.append("<h2>全文</h2>")
-        parts.append(article_html)
-    else:
-        parts.append("<p><strong>未抓到全文块。</strong></p>")
+            kt_desc_clean = html.escape(re.sub(r"\s+", " ", kt_desc).strip()) if kt_desc else ""
+            if kt_title and kt_desc_clean:
+                bits.append(f"<li><strong>{html.escape(kt_title.strip())}</strong> — {kt_desc_clean}</li>")
+            elif kt_title:
+                bits.append(f"<li><strong>{html.escape(kt_title.strip())}</strong></li>")
+            elif kt_desc_clean:
+                bits.append(f"<li>{kt_desc_clean}</li>")
+        bits.append("</ul></section>")
+        takeaways_html = "".join(bits)
 
     return f"""<!doctype html>
-<html>
-<meta charset=\"utf-8\">
-<head><title>{html.escape(title)}</title></head>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>{html.escape(title)}</title>
+  <link rel=\"canonical\" href=\"{html.escape(page_url)}\">
+  <style>
+    body {{ font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; }}
+    article {{ width:100%; }}
+    h1 {{ line-height:1.15; margin:0 0 14px; font-size:2.2rem; }}
+    h2 {{ margin-top:2rem; line-height:1.25; }}
+    h3 {{ margin-top:1.5rem; line-height:1.25; }}
+    .meta {{ color:#666; font-size:.95rem; margin:0 0 10px; }}
+    .authors {{ color:#333; font-size:1rem; margin:0 0 20px; }}
+    .summary {{ font-size:1.12rem; margin:1.1rem 0 1.4rem; }}
+    img {{ max-width:100%; height:auto; display:block; }}
+    figure {{ margin:1.5rem 0; }}
+    figcaption {{ color:#555; font-size:.92rem; margin-top:.55rem; }}
+    blockquote {{ border-left:4px solid #ddd; margin:1.4rem 0; padding:.2rem 0 .2rem 1rem; color:#333; }}
+    ul {{ padding-left:1.3rem; }}
+    a {{ color:#0b57d0; }}
+  </style>
+</head>
 <body>
-  <h1>{html.escape(title)}</h1>
-  {''.join(parts)}
+  <article>
+    <h1>{html.escape(title)}</h1>
+    {f'<div class="meta">{meta_line}</div>' if meta_line else ''}
+    {f'<div class="authors">{"".join(author_lines)}</div>' if author_lines else ''}
+    {hero_image_html}
+    {f'<div class="summary">{html.escape(summary)}</div>' if summary else ''}
+    {takeaways_html}
+    {article_html}
+  </article>
 </body>
 </html>
 """
@@ -237,7 +328,6 @@ def build_xml(items: list[dict], public_base: str) -> bytes:
     for item in items:
         title = item.get("title") or item.get("summaryTitle") or "Untitled"
         page_path = item.get("pagePath") or item.get("slug") or ""
-        page_url = urljoin(SITE_BASE, page_path)
         slug = slugify(page_path.split('/')[-1] if page_path else title)
         local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{slug}/"
         description = item.get("summaryDescription") or item.get("summaryTeaserText") or item.get("socialDescription") or ""
@@ -274,13 +364,10 @@ if __name__ == '__main__':
         page_url = urljoin(SITE_BASE, page_path)
         slug = slugify(page_path.split('/')[-1] if page_path else title)
         page_json = fetch_next_json(page_url)
-        summary, article_html, key_takeaways, authors, read_meta = extract_article_html(page_json)
+        article = extract_article_data(page_json)
         item_dir = site_dir / 'item' / FEED_NAME / slug
         item_dir.mkdir(parents=True, exist_ok=True)
-        (item_dir / 'index.html').write_text(
-            build_item_page(hit, page_url, article_html, summary, key_takeaways, authors, read_meta),
-            encoding='utf-8'
-        )
+        (item_dir / 'index.html').write_text(build_item_page(hit, page_url, article), encoding='utf-8')
 
     xml = build_xml(items, public_base)
     (site_dir / f'{FEED_NAME}.xml').write_bytes(xml)
