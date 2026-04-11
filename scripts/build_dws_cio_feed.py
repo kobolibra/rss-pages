@@ -11,6 +11,9 @@ from xml.dom import minidom
 from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element, SubElement
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import requests
 from bs4 import BeautifulSoup
 
@@ -150,51 +153,90 @@ def extract_chart_models_from_page(page: str) -> list[dict]:
     return charts
 
 
-def render_chart_tables(page: str) -> str:
+def render_chart_images(page: str, chart_dir: Path, public_base: str) -> str:
     charts = extract_chart_models_from_page(page)
+    chart_dir.mkdir(parents=True, exist_ok=True)
     parts = []
-    for chart in charts:
+    for idx, chart in enumerate(charts, 1):
         data = chart.get('data', {})
         csv_text = (((data.get('data') or {}).get('csv')) or '').strip()
         if not csv_text:
             continue
-        title = clean_text(BeautifulSoup((data.get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True))
-        credits = clean_text((data.get('credits') or {}).get('text') or '')
-        y_axes = data.get('yAxis') or []
-        axis_labels = []
-        if isinstance(y_axes, list):
-            for axis in y_axes[:3]:
-                label = clean_text(BeautifulSoup(((axis or {}).get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True))
-                if label:
-                    axis_labels.append(label)
         rows = list(csv.reader(io.StringIO(csv_text), delimiter='\t'))
-        if not rows:
+        if len(rows) < 2:
             continue
         header = rows[0]
         data_rows = rows[1:]
-        parts.append('<section class="chart-table">')
+        x = [r[0] for r in data_rows]
+        series_values = []
+        for col_idx in range(1, len(header)):
+            vals = []
+            for r in data_rows:
+                try:
+                    vals.append(float(r[col_idx]))
+                except Exception:
+                    vals.append(float('nan'))
+            series_values.append((header[col_idx], vals))
+
+        fig, ax1 = plt.subplots(figsize=(11, 5.6))
+        colors = ['#73a22a', '#489cd2', '#5a6d78', '#91887e']
+        chart_type_first = (((data.get('series') or [{}])[0]) or {}).get('type', 'line')
+        y_axes = data.get('yAxis') or []
+        if isinstance(y_axes, dict):
+            y_axes = [y_axes]
+
+        if series_values:
+            name1, vals1 = series_values[0]
+            if chart_type_first == 'column':
+                ax1.bar(range(len(x)), vals1, color=colors[0], width=0.8, label=name1)
+            else:
+                ax1.plot(range(len(x)), vals1, color=colors[0], linewidth=2.4, label=name1)
+            y1 = y_axes[0] if len(y_axes) > 0 else {}
+            ax1.set_ylabel(clean_text(BeautifulSoup((y1.get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True)))
+
+        ax2 = None
+        if len(series_values) >= 2:
+            ax2 = ax1.twinx()
+            name2, vals2 = series_values[1]
+            ax2.plot(range(len(x)), vals2, color=colors[1], linewidth=2.4, label=name2)
+            y2 = y_axes[1] if len(y_axes) > 1 else {}
+            ax2.set_ylabel(clean_text(BeautifulSoup((y2.get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True)))
+
+        tick_step = max(1, len(x) // 12)
+        ticks = list(range(0, len(x), tick_step))
+        ax1.set_xticks(ticks)
+        ax1.set_xticklabels([x[i] for i in ticks], rotation=45, ha='right', fontsize=8)
+        title = clean_text(BeautifulSoup((data.get('title') or {}).get('text') or '', 'html.parser').get_text(' ', strip=True)) or 'Chart'
+        ax1.set_title(title, loc='left', fontsize=14)
+        lines, labels = ax1.get_legend_handles_labels()
+        if ax2:
+            l2, lab2 = ax2.get_legend_handles_labels()
+            lines += l2; labels += lab2
+        if labels:
+            ax1.legend(lines, labels, loc='upper left', frameon=False)
+        ax1.grid(axis='y', alpha=0.18)
+        fig.tight_layout()
+
+        out = chart_dir / f'chart-{idx}.png'
+        fig.savefig(out, dpi=160, bbox_inches='tight')
+        plt.close(fig)
+
+        rel = out.relative_to(Path(public_base.replace('https://kobolibra.github.io/rss-pages', '') if public_base.startswith('https://kobolibra.github.io/rss-pages') else out))
+        # use site-relative URL instead of filesystem path
+        public_path = '/'.join(out.parts[out.parts.index('site') + 1:])
+        src = public_base.rstrip('/') + '/' + public_path
+        credits = clean_text((data.get('credits') or {}).get('text') or '')
+        parts.append('<section class="chart-image">')
         if title:
             parts.append(f'<h2>{html.escape(title)}</h2>')
-        parts.append('<div class="chart-fallback-note">Chart data table</div>')
-        if axis_labels:
-            parts.append(f'<div class="chart-meta">Axes: {html.escape(" / ".join(axis_labels))}</div>')
-        parts.append('<table><thead><tr>')
-        for col in header:
-            parts.append(f'<th>{html.escape(col)}</th>')
-        parts.append('</tr></thead><tbody>')
-        for row in data_rows:
-            parts.append('<tr>')
-            for col in row:
-                parts.append(f'<td>{html.escape(col)}</td>')
-            parts.append('</tr>')
-        parts.append('</tbody></table>')
+        parts.append(f'<figure><img src="{html.escape(src)}" alt="{html.escape(title or "Chart")}" loading="lazy"></figure>')
         if credits:
             parts.append(f'<div class="chart-meta">Source: {html.escape(credits)}</div>')
         parts.append('</section>')
     return ''.join(parts)
 
 
-def detail_content(url: str) -> dict:
+def detail_content(url: str, chart_dir: Path, public_base: str) -> dict:
     page = fetch(url)
 
     header_match = re.search(r'<vue-article-page-layout :model="([\s\S]*?)">', page)
@@ -205,9 +247,9 @@ def detail_content(url: str) -> dict:
     blocks = re.findall(r'Blocks\.Html\.Blocks\.HtmlBlock[\s\S]*?&quot;content&quot;:&quot;([\s\S]*?)&quot;,&quot;productBuyingProcessPageProps&quot;', page)
     html_blocks = [decode_vue_content(b) for b in blocks]
     body_html = "\n".join([b for b in html_blocks if b.strip()])
-    chart_tables_html = render_chart_tables(page)
-    if chart_tables_html:
-        body_html += "\n" + chart_tables_html
+    chart_images_html = render_chart_images(page, chart_dir, public_base)
+    if chart_images_html:
+        body_html += "\n" + chart_images_html
 
     article_header = header.get('articleHeaderProps', {}) if isinstance(header, dict) else {}
     intro = decode_vue_content(article_header.get('introText', '') or '')
@@ -319,10 +361,11 @@ if __name__ == '__main__':
         if '/en-us/insights/cio-view/' not in item['url']:
             continue
         selected.append(item)
-        detail = detail_content(item['url'])
         slug = slugify(item['url'].rstrip('/').split('/')[-1])
         item_dir = site_dir / 'item' / FEED_NAME / slug
+        chart_dir = item_dir / 'charts'
         item_dir.mkdir(parents=True, exist_ok=True)
+        detail = detail_content(item['url'], chart_dir, public_base)
         (item_dir / 'index.html').write_text(build_item_page(item, detail), encoding='utf-8')
 
     xml = build_xml(selected, public_base)
