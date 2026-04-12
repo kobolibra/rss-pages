@@ -27,29 +27,30 @@ def extract_latest(markdown_text: str):
     if 'Markdown Content:' in text:
         text = text.split('Markdown Content:', 1)[1]
 
-    title_match = re.search(r'(?m)^##\s+(.+?)\s*$', text)
-    if not title_match:
+    # The page now includes noisy site chrome (notably `## Search`) before the real weekly article.
+    # We anchor on `### Get the latest report`, then walk backwards to the nearest valid
+    # `## ...` heading before it; on the current page shape this yields the true weekly title.
+    report_marker = re.search(r'(?m)^###\s+Get the latest report\s*$', text)
+    if not report_marker:
+        raise RuntimeError("Could not find Barclays report marker")
+
+    prefix = text[:report_marker.start()]
+    heading_matches = list(re.finditer(r'(?m)^##\s+(.+?)\s*$', prefix))
+    if not heading_matches:
         raise RuntimeError("Could not parse Barclays weekly insights title")
 
-    title = re.sub(r'\s+', ' ', title_match.group(1)).strip()
-    body = text[title_match.end():]
+    bad_titles = {'search', 'share this page', 'weekly insights | barclays investment bank'}
+    title_match = None
+    for m in reversed(heading_matches):
+        candidate = re.sub(r'\s+', ' ', m.group(1)).strip()
+        if candidate.lower() not in bad_titles:
+            title_match = m
+            break
+    if not title_match:
+        raise RuntimeError("Could not find valid Barclays article title before report marker")
 
-    stop_markers = [
-        r'(?m)^###\s+Get the latest report\s*$',
-        r'(?m)^####\s+More from Barclays Research\s*$',
-        r'(?m)^Subscribe to The Eagle Eye Newsletter\s*$',
-        r'(?m)^Country of residence\s*$',
-        r'(?m)^\* We acknowledge and agree',
-        r'(?m)^I consent to my email address',
-        r'(?m)^All fields required\s*$',
-        r'(?m)^Email Cookies\s*$',
-    ]
-    cut = len(body)
-    for marker in stop_markers:
-        m = re.search(marker, body)
-        if m:
-            cut = min(cut, m.start())
-    body = body[:cut].strip()
+    title = re.sub(r'\s+', ' ', title_match.group(1)).strip()
+    body = text[title_match.end():report_marker.start()].strip()
 
     raw_blocks = [b.strip() for b in re.split(r'\n\n+', body) if b.strip()]
     blocks = []
