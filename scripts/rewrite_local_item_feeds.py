@@ -35,7 +35,7 @@ def build_page(title: str, body_html: str, source_link: str) -> str:
     )
     return f"""<!doctype html>
 <html>
-<meta charset="utf-8">
+<meta charset=\"utf-8\">
 <head>
   <title>{html.escape(title)}</title>
 </head>
@@ -110,6 +110,10 @@ def sanitize_feed_html(feed_name: str, value: str) -> str:
 
 
 def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: str):
+    if not xml_path.exists():
+        print(f"skip {feed_name}: source feed missing at {xml_path}")
+        return False
+
     tree = ET.parse(xml_path)
     root = tree.getroot()
     channel = root.find("channel")
@@ -196,6 +200,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
     pretty = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     xml_path.write_bytes(pretty)
     print(f"rewritten: {xml_path}")
+    return True
 
 
 if __name__ == "__main__":
@@ -207,4 +212,7 @@ if __name__ == "__main__":
     public_base = sys.argv[2]
     feed_names = [x.strip() for x in sys.argv[3].split(",") if x.strip()]
     for feed_name in feed_names:
-        rewrite_feed(site_dir / f"{feed_name}.xml", site_dir, public_base, feed_name)
+        try:
+            rewrite_feed(site_dir / f"{feed_name}.xml", site_dir, public_base, feed_name)
+        except Exception as exc:
+            print(f"skip {feed_name}: rewrite failed: {exc}")

@@ -32,6 +32,7 @@ jobs:
       - name: Prepare dirs
         run: |
           mkdir -p site feeds/output
+          rm -f feeds/output/*.xml feeds/output/*_items.json || true
 
       - name: Mirror RSS feeds
         run: |
@@ -39,17 +40,19 @@ jobs:
         env:
           OUT_DIR: site
 
-      - name: Build WebToRSS feeds
+      - name: Build WebToRSS feeds (per-feed fallback to live copy)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          python web_to_rss.py -c feeds/blackrock_weekly_commentary.yaml -f -o blackrock_weekly_commentary.xml
-          python web_to_rss.py -c feeds/carlyle_insights.yaml -f -o carlyle_insights.xml
-          if ! python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml; then
-            echo "PitchBook build failed; restoring previously published copy"
-            python scripts/restore_live_pages_feed.py "$BASE_URL" site "pitchbook_reports"
-          fi
-          python web_to_rss.py -c feeds/yardeni_morning_briefing.yaml -f -o yardeni_morning_briefing.xml
+
+          python scripts/build_with_live_fallback.py "$BASE_URL" site blackrock_weekly_commentary 1 \
+            python web_to_rss.py -c feeds/blackrock_weekly_commentary.yaml -f -o blackrock_weekly_commentary.xml
+          python scripts/build_with_live_fallback.py "$BASE_URL" site carlyle_insights 1 \
+            python web_to_rss.py -c feeds/carlyle_insights.yaml -f -o carlyle_insights.xml
+          python scripts/build_with_live_fallback.py "$BASE_URL" site pitchbook_reports 1 \
+            python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml
+          python scripts/build_with_live_fallback.py "$BASE_URL" site yardeni_morning_briefing 1 \
+            python web_to_rss.py -c feeds/yardeni_morning_briefing.yaml -f -o yardeni_morning_briefing.xml
 
       - name: Copy generated XML to site
         run: |
@@ -62,13 +65,16 @@ jobs:
 
           if [ ! -f site/trivium_finance_regs.xml ]; then
             echo "trivium_finance_regs.xml missing before rewrite; restoring from live Pages"
-            python scripts/restore_live_pages_feed.py "$BASE_URL" site "trivium_finance_regs"
+            python scripts/restore_live_pages_feed.py "$BASE_URL" site "trivium_finance_regs" --xml-only
           fi
 
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
-          python scripts/build_barclays_feed.py site "$BASE_URL"
-          python scripts/build_gsam_insights_feed.py site "$BASE_URL"
-          python scripts/build_dws_cio_feed.py site "$BASE_URL"
+          python scripts/build_with_live_fallback.py "$BASE_URL" site barclays_weekly_insights 1 \
+            python scripts/build_barclays_feed.py site "$BASE_URL"
+          python scripts/build_with_live_fallback.py "$BASE_URL" site gsam 1 \
+            python scripts/build_gsam_insights_feed.py site "$BASE_URL"
+          python scripts/build_with_live_fallback.py "$BASE_URL" site dws_cio 1 \
+            python scripts/build_dws_cio_feed.py site "$BASE_URL"
 
       - name: Preserve unchanged Barclays / BlackRock outputs
         run: |

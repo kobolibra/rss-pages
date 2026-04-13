@@ -2,6 +2,7 @@ name: "blackrock_weekly_commentary"
 version: "1.0"
 source:
   url: "https://www.blackrock.com/corporate/insights/blackrock-investment-institute/publications/weekly-commentary"
+  prefer_raw: true
 
 output:
   channel:

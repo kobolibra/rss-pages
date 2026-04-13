@@ -874,8 +874,12 @@ class WebToRSS:
         if not force:
             page_html = self._load_cache(src)
 
+        prefer_raw = bool(self.config.get("source", {}).get("prefer_raw", False))
+        if parse_mode in {"blackrock_weekly_commentary", "blackrock_weekly_single"}:
+            prefer_raw = True
+
         if page_html is None or force:
-            page_html = self._fetch_html(src, headers=headers)
+            page_html = self._fetch_html(src, headers=headers, prefer_raw=prefer_raw)
             self._save_cache(src, page_html)
         if parse_mode == "blackrock_weekly_single":
             xml = self._generate_blackrock_weekly(page_html, src)
