@@ -68,6 +68,21 @@ assert_localized_link('blackrock_weekly_commentary', blackrock_link)
 if blackrock_content:
     fail(f'BlackRock should not embed feed body anymore: {len(blackrock_content)} chars present')
 
+blackrock_path = urlparse(blackrock_link).path
+if BASE:
+    base_path = urlparse(BASE).path.rstrip('/')
+    if base_path and blackrock_path.startswith(base_path):
+        blackrock_path = blackrock_path[len(base_path):]
+blackrock_local = SITE / blackrock_path.lstrip('/') / 'index.html' if not blackrock_path.endswith('index.html') else SITE / blackrock_path.lstrip('/')
+if not blackrock_local.exists():
+    fail(f'BlackRock local item page missing: {blackrock_local}')
+blackrock_page_text = strip_html(blackrock_local.read_text(encoding='utf-8'))
+for needle in ['Our bottom line', 'Market backdrop', 'Week ahead']:
+    if needle not in blackrock_page_text:
+        fail(f'BlackRock local item page missing body marker: {needle}')
+if len(blackrock_page_text) < 2500:
+    fail(f'BlackRock local item page unexpectedly short: {len(blackrock_page_text)} chars')
+
 # Trivium: boilerplate footer stripped
 trivium = read_first_item('trivium_finance_regs')
 trivium_text = (trivium.findtext('description') or '') + ' ' + (trivium.findtext(CONTENT) or '')

@@ -135,6 +135,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         pub_date = get_text(item, "pubDate")
         author = get_text(item, "author")
         source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
+        page_body_html = source_content_html
         if feed_name in {"pitchbook_reports", "carlyle_insights", "blackrock_weekly_commentary"}:
             # 这些 feed 需要让阅读器优先根据链接抓正文；
             # 不再把摘要/正文重复塞进 content:encoded。
@@ -150,7 +151,7 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         out_dir = site_dir / "item" / feed_name / slug
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "index.html").write_text(
-            build_page(title, content_html or html.escape(desc), link),
+            build_page(title, page_body_html or content_html or html.escape(desc), link),
             encoding="utf-8",
         )
 
