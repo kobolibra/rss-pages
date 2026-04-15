@@ -500,10 +500,10 @@ class WebToRSS:
                 break
 
             if comp_name.lower() == 'paragraph':
-                first_img = sib.find('img')
-                if first_img:
-                    _append_image(first_img)
-                for elem in sib.find_all(['h2', 'p']):
+                for elem in sib.find_all(['h2', 'p', 'img']):
+                    if elem.name == 'img':
+                        _append_image(elem)
+                        continue
                     if 'footnotes' in ((elem.get('class') or [])):
                         continue
                     text = elem.get_text(' ', strip=True)
