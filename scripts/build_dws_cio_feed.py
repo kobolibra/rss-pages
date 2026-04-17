@@ -3,9 +3,10 @@ import json
 import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element, SubElement
@@ -14,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-LIST_URL = "https://www.dws.com/en-us/insights/cio-view/cio-archive/?view=List&Sort=-Date%2c-Title"
+LIST_URL = "https://www.dws.com/en-us/insights/archive/"
 SITE_BASE = "https://www.dws.com"
 FEED_NAME = "dws_cio"
 FEED_TITLE = "DWS CIO View"
@@ -29,6 +30,12 @@ def fetch(url: str) -> str:
     return r.text
 
 
+def fetch_bytes(url: str) -> bytes:
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    return r.content
+
+
 def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
@@ -41,6 +48,132 @@ def slugify(value: str) -> str:
 def public_url_for_path(path: Path, public_base: str, site_dir: Path) -> str:
     public_path = "/".join(path.relative_to(site_dir).parts)
     return public_base.rstrip("/") + "/" + public_path
+
+
+def parse_dws_date(value: str) -> datetime | None:
+    value = clean_text(value)
+    if not value:
+        return None
+    for fmt in ("%d-%b-%y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def format_rss_date(dt: datetime | None) -> str:
+    dt = dt or datetime.now(timezone.utc)
+    return format_datetime(dt.astimezone(timezone.utc), usegmt=True)
+
+
+def load_live_feed_state(public_base: str) -> dict:
+    feed_url = f"{public_base.rstrip('/')}/{FEED_NAME}.xml"
+    try:
+        xml_bytes = fetch_bytes(feed_url)
+    except Exception:
+        return {"items": {}, "last_build_date": None}
+
+    state = {"items": {}, "last_build_date": None}
+    try:
+        root = ET.fromstring(xml_bytes)
+        channel = root.find("channel")
+        if channel is None:
+            return state
+        last_build = clean_text(channel.findtext("lastBuildDate") or "")
+        if last_build:
+            try:
+                state["last_build_date"] = parsedate_to_datetime(last_build)
+            except Exception:
+                state["last_build_date"] = None
+        for rss_item in channel.findall("item"):
+            link = clean_text(rss_item.findtext("link") or "")
+            if not link:
+                continue
+            slug = slugify(link.rstrip("/").split("/")[-1])
+            pub_date_text = clean_text(rss_item.findtext("pubDate") or "")
+            pub_date = None
+            if pub_date_text:
+                try:
+                    pub_date = parsedate_to_datetime(pub_date_text)
+                except Exception:
+                    pub_date = None
+            state["items"][slug] = {
+                "title": clean_text(rss_item.findtext("title") or ""),
+                "description": clean_text(rss_item.findtext("description") or ""),
+                "link": link,
+                "pub_date": pub_date,
+            }
+    except Exception:
+        return {"items": {}, "last_build_date": None}
+    return state
+
+
+def restore_live_item_tree(item_url: str, public_base: str, site_dir: Path) -> bool:
+    try:
+        item_bytes = fetch_bytes(item_url)
+    except Exception:
+        return False
+
+    parsed_item = urlparse(item_url)
+    base_path = urlparse(public_base).path.rstrip("/")
+
+    def relative_site_path(url: str) -> Path | None:
+        parsed = urlparse(url)
+        rel_path = parsed.path
+        if base_path and rel_path.startswith(base_path + "/"):
+            rel_path = rel_path[len(base_path) + 1 :]
+        else:
+            rel_path = rel_path.lstrip("/")
+        if not rel_path:
+            return None
+        return site_dir / rel_path
+
+    item_path = parsed_item.path.rstrip("/") + "/"
+    out_dir = relative_site_path(item_url)
+    if out_dir is None:
+        return False
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "index.html").write_bytes(item_bytes)
+
+    soup = BeautifulSoup(item_bytes, "html.parser")
+    asset_urls = set()
+
+    for tag in soup.find_all(src=True):
+        asset_url = urljoin(item_url, tag.get("src") or "")
+        parsed = urlparse(asset_url)
+        if parsed.netloc == parsed_item.netloc and parsed.path.startswith(item_path) and not parsed.path.endswith("/"):
+            asset_urls.add(asset_url)
+
+    for tag in soup.find_all(srcset=True):
+        srcset = tag.get("srcset") or ""
+        for part in srcset.split(","):
+            candidate = part.strip().split(" ")[0]
+            if not candidate:
+                continue
+            asset_url = urljoin(item_url, candidate)
+            parsed = urlparse(asset_url)
+            if parsed.netloc == parsed_item.netloc and parsed.path.startswith(item_path) and not parsed.path.endswith("/"):
+                asset_urls.add(asset_url)
+
+    for asset_url in sorted(asset_urls):
+        try:
+            asset_bytes = fetch_bytes(asset_url)
+        except Exception:
+            continue
+        asset_path = relative_site_path(asset_url)
+        if asset_path is None:
+            continue
+        asset_path.parent.mkdir(parents=True, exist_ok=True)
+        asset_path.write_bytes(asset_bytes)
+
+    return True
+
+
+def item_looks_unchanged(item: dict, previous: dict | None) -> bool:
+    if not previous:
+        return False
+    return clean_text(item.get("title")) == previous.get("title", "") and clean_text(item.get("description")) == previous.get("description", "")
 
 
 def list_items() -> list[dict]:
@@ -385,13 +518,13 @@ def build_item_page(item: dict, detail: dict) -> str:
 """
 
 
-def build_xml(items: list[dict], public_base: str) -> bytes:
+def build_xml(items: list[dict], public_base: str, last_build_date: datetime | None) -> bytes:
     rss = Element("rss", version="2.0")
     channel = SubElement(rss, "channel")
     SubElement(channel, "title").text = FEED_TITLE
     SubElement(channel, "link").text = f"{public_base.rstrip('/')}/{FEED_NAME}.xml"
     SubElement(channel, "description").text = FEED_DESC
-    SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+    SubElement(channel, "lastBuildDate").text = format_rss_date(last_build_date)
     SubElement(channel, "generator").text = "GitHub Pages RSS rewrite"
 
     for item in items:
@@ -403,7 +536,7 @@ def build_xml(items: list[dict], public_base: str) -> bytes:
         guid = SubElement(it, "guid")
         guid.set("isPermaLink", "true")
         guid.text = local_url
-        SubElement(it, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+        SubElement(it, "pubDate").text = format_rss_date(item.get("pub_date"))
         if item.get("description"):
             SubElement(it, "description").text = item["description"]
 
@@ -420,19 +553,46 @@ if __name__ == "__main__":
     site_dir.mkdir(parents=True, exist_ok=True)
 
     items = list_items()
+    live_state = load_live_feed_state(public_base)
+    live_items = live_state.get("items", {})
     selected = []
-    with DWSChartCapturer() as chart_capturer:
+    changed = False
+    chart_capturer = None
+
+    try:
         for item in items:
             if "/en-us/insights/cio-view/" not in item["url"]:
                 continue
-            selected.append(item)
+
             slug = slugify(item["url"].rstrip("/").split("/")[-1])
+            previous = live_items.get(slug)
+            item["pub_date"] = parse_dws_date(item.get("date", "")) or (previous or {}).get("pub_date")
+            selected.append(item)
+
+            if item_looks_unchanged(item, previous) and previous and previous.get("link"):
+                if restore_live_item_tree(previous["link"], public_base, site_dir):
+                    continue
+
+            changed = True
             item_dir = site_dir / "item" / FEED_NAME / slug
             chart_dir = item_dir / "charts"
             item_dir.mkdir(parents=True, exist_ok=True)
-            detail = detail_content(item["url"], chart_dir, public_base, site_dir, chart_capturer)
-            (item_dir / "index.html").write_text(build_item_page(item, detail), encoding="utf-8")
 
-    xml = build_xml(selected, public_base)
+            if chart_capturer is None:
+                chart_capturer = DWSChartCapturer().__enter__()
+
+            detail = detail_content(item["url"], chart_dir, public_base, site_dir, chart_capturer)
+            item["pub_date"] = parse_dws_date(detail.get("date", "")) or item.get("pub_date")
+            (item_dir / "index.html").write_text(build_item_page(item, detail), encoding="utf-8")
+    finally:
+        if chart_capturer is not None:
+            chart_capturer.__exit__(None, None, None)
+
+    current_slugs = {slugify(item["url"].rstrip("/").split("/")[-1]) for item in selected}
+    if set(live_items.keys()) != current_slugs:
+        changed = True
+
+    last_build_date = datetime.now(timezone.utc) if changed or not live_state.get("last_build_date") else live_state.get("last_build_date")
+    xml = build_xml(selected, public_base, last_build_date)
     (site_dir / f"{FEED_NAME}.xml").write_bytes(xml)
     print(f"built {FEED_NAME} with {len(selected)} items")
