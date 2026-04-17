@@ -176,6 +176,30 @@ def item_looks_unchanged(item: dict, previous: dict | None) -> bool:
     return clean_text(item.get("title")) == previous.get("title", "") and clean_text(item.get("description")) == previous.get("description", "")
 
 
+def live_item_page_needs_rebuild(item_url: str) -> bool:
+    try:
+        item_html = fetch(item_url)
+    except Exception:
+        return True
+
+    suspicious_text = ("â\x80", "Â\xa0", "Â </", "Â<", "Â\n", "â", "Â ")
+    if any(token in item_html for token in suspicious_text):
+        return True
+
+    soup = BeautifulSoup(item_html, "html.parser")
+    for tag in soup.find_all(src=True):
+        src = tag.get("src") or ""
+        if src.startswith("/globalassets/") or src.startswith("/_-"):
+            return True
+    for tag in soup.find_all(srcset=True):
+        srcset = tag.get("srcset") or ""
+        for part in srcset.split(","):
+            candidate = part.strip().split(" ")[0]
+            if candidate.startswith("/globalassets/") or candidate.startswith("/_-"):
+                return True
+    return False
+
+
 def list_items() -> list[dict]:
     html_text = fetch(LIST_URL)
     soup = BeautifulSoup(html_text, "html.parser")
@@ -225,10 +249,52 @@ def list_items() -> list[dict]:
     return items
 
 
+def repair_mojibake_text(s: str) -> str:
+    if not s:
+        return s
+    suspicious = ("â", "Â", "Ã")
+    if not any(token in s for token in suspicious):
+        return s
+    try:
+        repaired = s.encode("latin1").decode("utf-8")
+        if sum(repaired.count(token) for token in suspicious) < sum(s.count(token) for token in suspicious):
+            return repaired
+    except Exception:
+        pass
+    return s
+
+
+def absolutize_asset_urls(fragment: str, base_url: str) -> str:
+    if not fragment:
+        return fragment
+    soup = BeautifulSoup(fragment, "html.parser")
+    for tag in soup.find_all(src=True):
+        src = tag.get("src") or ""
+        if src.startswith("/"):
+            tag["src"] = urljoin(base_url, src)
+    for tag in soup.find_all(href=True):
+        href = tag.get("href") or ""
+        if href.startswith("/"):
+            tag["href"] = urljoin(base_url, href)
+    for tag in soup.find_all(srcset=True):
+        srcset = tag.get("srcset") or ""
+        parts = []
+        for part in srcset.split(","):
+            chunk = part.strip()
+            if not chunk:
+                continue
+            bits = chunk.split()
+            bits[0] = urljoin(base_url, bits[0])
+            parts.append(" ".join(bits))
+        tag["srcset"] = ", ".join(parts)
+    return str(soup)
+
+
 def decode_vue_content(raw: str) -> str:
     s = html.unescape(raw)
     s = s.encode("utf-8").decode("unicode_escape")
     s = html.unescape(s)
+    s = repair_mojibake_text(s)
     s = s.replace("\\n", "\n")
     s = s.replace("\\/", "/")
     s = re.sub(
@@ -440,6 +506,7 @@ def detail_content(url: str, chart_dir: Path, public_base: str, site_dir: Path, 
             html_blocks.append(decoded)
 
     body_html = "\n".join(html_blocks)
+    body_html = absolutize_asset_urls(body_html, url)
     source_chart_count = len(extract_chart_models_from_page(page))
     body_html, chart_index = inject_chart_placeholders(body_html, source_chart_count)
     chart_urls = chart_capturer.capture(url, chart_dir, public_base, site_dir) if chart_index else []
@@ -454,6 +521,7 @@ def detail_content(url: str, chart_dir: Path, public_base: str, site_dir: Path, 
 
     article_header = header.get("articleHeaderProps", {}) if isinstance(header, dict) else {}
     intro = decode_vue_content(article_header.get("introText", "") or "")
+    intro = absolutize_asset_urls(intro, url)
     hero = article_header.get("image") or {}
     hero_src = hero.get("src") or ""
     if hero_src.startswith("/"):
@@ -570,7 +638,7 @@ if __name__ == "__main__":
             selected.append(item)
 
             if item_looks_unchanged(item, previous) and previous and previous.get("link"):
-                if restore_live_item_tree(previous["link"], public_base, site_dir):
+                if not live_item_page_needs_rebuild(previous["link"]) and restore_live_item_tree(previous["link"], public_base, site_dir):
                     continue
 
             changed = True
