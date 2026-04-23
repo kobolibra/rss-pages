@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Barclays Weekly Insights</title>
+    <link>https://kobolibra.github.io/rss-pages/barclays_weekly_insights.xml</link>
+    <description>Barclays Investment Bank analyses key macroeconomic developments and prepares readers for related data and events in the week ahead.</description>
+    <lastBuildDate>Mon, 20 Apr 2026 02:48:55 GMT</lastBuildDate>
+    <generator>GitHub Pages RSS rewrite</generator>
+    <item>
+      <title>What a difference a deal makes</title>
+      <link>https://kobolibra.github.io/rss-pages/item/barclays_weekly_insights/what-a-difference-a-deal-makes/</link>
+      <guid isPermaLink="true">https://kobolibra.github.io/rss-pages/item/barclays_weekly_insights/what-a-difference-a-deal-makes/</guid>
+      <pubDate>Mon, 20 Apr 2026 02:48:55 GMT</pubDate>
+      <description>Oil prices eased and risk assets soared in expectation of a US-Iran deal that would open the Strait of Hormuz. Central banks signaled 'no rush' in their policy responses and markets priced out aggressive rate hike scenarios. To justify this optimism, much now depends on the actual deal to deliver.</description>
+    </item>
+  </channel>
+</rss>

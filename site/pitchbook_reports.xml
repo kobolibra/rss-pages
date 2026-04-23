@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>PitchBook Reports</title>
+    <link>https://pitchbook.com/news/reports</link>
+    <description>PitchBook Research Reports RSS generated from web page</description>
+    <language>en</language>
+    <lastBuildDate>Wed, 22 Apr 2026 04:38:20 GMT</lastBuildDate>
+    <generator>GitHub Pages RSS rewrite</generator>
+    <item>
+      <title>Headless, Autonomous, and Unstoppable: Salesforce Does It Again Salesforce’s Headless 360 marks the end of the dashboard, signaling a massive shift toward autonomous enterprise AI. As graphical interfaces vanish, discover why AgentOps is the new mandatory enterprise investment. Q2 2026|</title>
+      <link>https://pitchbook.com/news/reports/q2-2026-headless-autonomous-and-unstoppable-salesforce-does-it-again</link>
+      <guid isPermaLink="false">471e8dc212af810cc3468232ccd69f15</guid>
+      <pubDate>Tue, 21 Apr 2026 00:00:00 GMT</pubDate>
+      <description>Headless, Autonomous, and Unstoppable: Salesforce Does It Again Salesforce’s Headless 360 marks the end of the dashboard, signaling a massive shift toward autonomous enterprise AI. As graphical interfaces vanish, discover why AgentOps is the new mandatory enterprise investment. Q2 2026|</description>
+    </item>
+    <item>
+      <title>Germany Market Snapshot</title>
+      <link>https://pitchbook.com/news/reports/q1-2026-germany-market-snapshot</link>
+      <guid isPermaLink="false">c02acedbd1f37c9bac9c2816a9a47375</guid>
+      <pubDate>Tue, 21 Apr 2026 00:00:00 GMT</pubDate>
+      <description>The Q1 2026 Germany Market Snapshot provides an overview of macroeconomic and microeconomic trends in the region spanning both private and public markets. Q1 2026|</description>
+    </item>
+    <item>
+      <title>PitchBook Analyst Note: Digital Infrastructure Funds Update</title>
+      <link>https://pitchbook.com/news/reports/q2-2026-pitchbook-analyst-note-digital-infrastructure-funds-update</link>
+      <guid isPermaLink="false">c4130b6717567bb7c1b15a0b1033c050</guid>
+      <pubDate>Mon, 20 Apr 2026 00:00:00 GMT</pubDate>
+      <description>This analyst note examines the record fundraising and strong relative performance of digital infrastructure funds in 2025, driven by growing AI- and cloud-driven demand for compute. Q2 2026|</description>
+    </item>
+    <item>
+      <title>PitchBook Analyst Note: Agentic AI:</title>
+      <link>https://pitchbook.com/news/reports/q2-2026-pitchbook-analyst-note-agentic-ai-the-evolution-to-autonomous-systems-part-ii</link>
+      <guid isPermaLink="false">303a53cd9a85f76cc2ab0b60bf452a19</guid>
+      <pubDate>Fri, 17 Apr 2026 00:00:00 GMT</pubDate>
+      <description>The Evolution to Autonomous Systems: Part II This analyst note examines the deployment of agentic AI, highlighting how adoption, trust, and workflow ownership are reshaping enterprise integration and long-term competitive differentiation. Q2 2026|</description>
+    </item>
+    <item>
+      <title>Global Distressed Credit Weekly Wrap</title>
+      <link>https://pitchbook.com/news/reports/april-17-2026-global-distressed-credit-weekly-wrap</link>
+      <guid isPermaLink="false">bdaa15afd382c7979a66d0eeaca694b4</guid>
+      <pubDate>Fri, 17 Apr 2026 00:00:00 GMT</pubDate>
+      <description>The Global Distressed Credit Weekly Wrap provides a comprehensive summary of the latest news for leveraged loans and high-yield bonds, and a rundown of courtroom bankruptcy activity.</description>
+    </item>
+  </channel>
+</rss>

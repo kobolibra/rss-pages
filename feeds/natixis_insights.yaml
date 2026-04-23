@@ -1,0 +1,26 @@
+name: "natixis_insights"
+version: "1.0"
+source:
+  url: "https://www.im.natixis.com/en-us/insights"
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; Win64; x64) AppleWebKit/537.36"
+  # use direct endpoint via data-endpoint and avoid browser block/r.jina noise
+  # parse_mode is handled by web_to_rss custom logic if set
+
+settings:
+  max_items: 50
+  dedup: true
+  parse_mode: "natixis_listing_json"
+  cache_ttl: 3600
+
+output:
+  channel:
+    title: "Natixis Insights"
+    link: "https://www.im.natixis.com/en-us/insights"
+    description: "Natixis Investment Managers insights feed"
+    language: "en"
+  item:
+    title: "{0}"
+    link: "{1}"
+
+output_file: "natixis_insights.xml"
