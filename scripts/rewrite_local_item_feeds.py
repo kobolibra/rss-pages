@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
 ET.register_namespace("content", CONTENT_NS)
 
-SOURCE_LINK_FEEDS = {"carlyle_insights", "pitchbook_reports"}
+SOURCE_LINK_FEEDS = {"carlyle_insights", "pitchbook_reports", "natixis_insights"}
 SUMMARY_LOCAL_FEEDS = {"pantheonmacro", "trivium_finance_regs", "yardeni_morning_briefing"}
 
 
@@ -136,11 +136,15 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         author = get_text(item, "author")
         source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
         page_body_html = source_content_html
-        if feed_name in {"pitchbook_reports", "carlyle_insights", "blackrock_weekly_commentary"}:
-            # 这些 feed 需要让阅读器优先根据链接抓正文；
-            # 不再把摘要/正文重复塞进 content:encoded。
+        if feed_name in SOURCE_LINK_FEEDS:
+            # 这类源希望保留原文链接，feed 不再内嵌正文，交给阅读器抓取原文。
+            content_html = ""
+        elif feed_name == "blackrock_weekly_commentary":
+            # Barclays/BlackRock 策略同理：feed 内不重复放正文正文；
+            # item page 用原始抓取内容承载正文。
             content_html = ""
         else:
+            # Natixis 在改为原文链接前是本地正文策略；目前转为原文链接后同样去掉内嵌正文。
             content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html
         full_text = html_to_text(content_html)
         if feed_name != "blackrock_weekly_commentary" and len(full_text) > len(desc or ""):

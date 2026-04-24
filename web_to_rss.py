@@ -785,6 +785,41 @@ class WebToRSS:
             })
         return items
 
+    def _extract_natixis_listing_items(self, limit: int = 50) -> List[Dict[str, str]]:
+        endpoint = 'https://www.im.natixis.com/content/natixis/us/en/insights/jcr:content/root/container/listing_searchfilter.filter.json'
+        resp = requests.get(endpoint, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        items = []
+        for item in payload[:limit]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get('url') or '').strip()
+            title = str(item.get('title') or '').strip()
+            if not url.startswith('/en-us/insights/'):
+                continue
+            if not title:
+                continue
+
+            full_link = f"https://www.im.natixis.com{url}"
+            description = str(item.get('description') or '').strip()
+            date_str = str(item.get('formattedPublishedDate') or item.get('formattedArticleDate') or '').strip()
+            image = str(item.get('image') or '').strip()
+            if image and image.startswith('/'):
+                image = f"https://www.im.natixis.com{image}"
+
+            item_data = {
+                'title': title,
+                'url': full_link,
+                'description': description,
+                'date_str': date_str,
+                'image': image,
+            }
+            items.append(item_data)
+
+        return items
+
     def _generate_yardeni_morning_briefing(self, markdown_text: str, public_base: str = "") -> str:
         ch = self.config["output"]["channel"]
         builder = RSSBuilder(ch["title"], ch["link"], ch["description"])
@@ -888,6 +923,62 @@ class WebToRSS:
                 p = self.out_dir / out_file
                 p.write_text(xml, encoding="utf-8")
                 print(f"[WebToRSS] saved: {p}")
+            return xml
+
+
+        ch = self.config["output"]["channel"]
+        settings = self.config.get("settings", {})
+        if parse_mode == "natixis_listing_json":
+            items = self._extract_natixis_listing_items(int(settings.get("max_items", 50)))
+            builder = RSSBuilder(ch["title"], ch["link"], ch["description"])
+            seen = set()
+            for item in items:
+                title = item.get("title", "")
+                if not title:
+                    continue
+                link = item.get("url", "")
+                if not link:
+                    continue
+                description = item.get("description", "")
+                date_str = item.get("date_str", "")
+                guid = self._md5(f"{title}|{link}")
+                if guid in seen:
+                    continue
+                seen.add(guid)
+
+                if date_str:
+                    pub_date = None
+                    for fmt in ["%B %d, %Y", "%b %d, %Y", "%B %d, %Y", "%b. %Y", "%Y-%m-%d"]:
+                        try:
+                            dt = datetime.strptime(date_str, fmt)
+                            pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                            break
+                        except Exception:
+                            continue
+                    if pub_date is None:
+                        pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+                else:
+                    pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+                # Natixis: 交给 reader 回源抓正文，避免 feed 内再塞正文
+                content_html = ""
+
+                builder.add_item(
+                    title=title,
+                    link=link,
+                    description=description or title,
+                    pub_date=pub_date,
+                    guid=guid,
+                    content_html=content_html,
+                )
+
+            out_file = self.config.get("output_file")
+            xml = builder.to_xml()
+            if out_file:
+                p = self.out_dir / out_file
+                p.write_text(xml, encoding="utf-8")
+                print(f"[WebToRSS] saved: {p}")
+            print(f"[WebToRSS] matched=natixis emitted={len(seen)}")
             return xml
 
         if parse_mode == "yardeni_morning_briefing":
