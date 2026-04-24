@@ -54,6 +54,8 @@ jobs:
             python web_to_rss.py -c feeds/pitchbook_reports.yaml -f -o pitchbook_reports.xml
           python scripts/build_with_live_fallback.py "$BASE_URL" site yardeni_morning_briefing 1 \
             python web_to_rss.py -c feeds/yardeni_morning_briefing.yaml -f -o yardeni_morning_briefing.xml
+          python scripts/build_with_live_fallback.py "$BASE_URL" site natixis_insights 1 \
+            python web_to_rss.py -c feeds/natixis_insights.yaml -f -o natixis_insights.xml
 
       - name: Copy generated XML to site
         run: |
@@ -69,7 +71,7 @@ jobs:
             python scripts/restore_live_pages_feed.py "$BASE_URL" site "trivium_finance_regs" --xml-only
           fi
 
-          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing"
+          python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing,natixis_insights"
           python scripts/build_with_live_fallback.py "$BASE_URL" site barclays_weekly_insights 1 \
             python scripts/build_barclays_feed.py site "$BASE_URL"
           python scripts/build_with_live_fallback.py "$BASE_URL" site gsam 1 \
@@ -107,6 +109,7 @@ jobs:
               <li><a href="carlyle_insights.xml">carlyle_insights</a></li>
               <li><a href="pitchbook_reports.xml">pitchbook_reports</a></li>
               <li><a href="yardeni_morning_briefing.xml">yardeni_morning_briefing</a></li>
+              <li><a href="natixis_insights.xml">Natixis Insights</a></li>
               <li><a href="gsam.xml">gsam</a></li>
               <li><a href="dws_cio.xml">dws_cio</a></li>
             </ul>
