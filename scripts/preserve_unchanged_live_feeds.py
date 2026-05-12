@@ -74,6 +74,9 @@ if __name__ == "__main__":
         live_url = f"{base_url}/{feed_name}.xml"
         print(f"checking {feed_name} against live {live_url}")
         resp = requests.get(live_url, timeout=30)
+        if resp.status_code == 404:
+            print(f"skip {feed_name}: live feed not found yet")
+            continue
         resp.raise_for_status()
         live_bytes = resp.content
         local_bytes = local_path.read_bytes()
