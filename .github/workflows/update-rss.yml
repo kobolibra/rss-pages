@@ -85,7 +85,7 @@ jobs:
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights,dbresearch_global_search"
+          python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights"
 
       - name: Validate generated feeds (restore last known-good on regression)
         run: |
