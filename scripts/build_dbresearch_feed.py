@@ -356,29 +356,56 @@ def extract_article_text_from_jina(raw_text: str, title: str, description: str) 
 
 
 def build_local_page(title: str, source_link: str, description: str, paragraphs: list[str]) -> str:
-    parts = [
+    escaped_title = html.escape(title)
+    escaped_source = html.escape(source_link)
+    text_block = []
+    if paragraphs:
+        for para in paragraphs:
+            text_block.append(f"  <p>{html.escape(para)}</p>")
+    else:
+        text_block.append("  <p>PDF text extraction returned no readable text.</p>")
+
+    return "\n".join([
         "<!doctype html>",
         '<html lang="en">',
-        '<meta charset="utf-8">',
         "<head>",
-        f"  <title>{html.escape(title)}</title>",
+        '  <meta charset="utf-8">',
+        f"  <title>{escaped_title}</title>",
         '  <meta name="viewport" content="width=device-width, initial-scale=1">',
+        '  <style>',
+        '    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #111; background: #fff; }',
+        '    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }',
+        '    h1 { line-height: 1.2; margin: 0 0 12px; }',
+        '    .meta { color: #444; margin-bottom: 18px; }',
+        '    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0 20px; }',
+        '    .btn { display: inline-block; padding: 10px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; }',
+        '    .btn.primary { background: #111; color: #fff; border-color: #111; }',
+        '    .pdfbox { margin: 20px 0 28px; border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #f6f6f6; }',
+        '    iframe, embed { width: 100%; height: 80vh; border: 0; display: block; background: white; }',
+        '    h2 { margin-top: 32px; }',
+        '    .text { max-width: 820px; line-height: 1.7; font-size: 16px; }',
+        '    .text p { margin: 0 0 1em; }',
+        '  </style>',
         "</head>",
         "<body>",
-        f"  <h1>{html.escape(title)}</h1>",
-    ]
-    if source_link:
-        parts.append(f"  <p>Source PDF: {html.escape(source_link)}</p>")
-    if description:
-        parts.append(f"  <p><strong>Summary:</strong> {html.escape(description)}</p>")
-    if paragraphs:
-        parts.append("  <hr>")
-        for para in paragraphs:
-            parts.append(f"  <p>{html.escape(para)}</p>")
-    else:
-        parts.append("  <p>PDF text extraction returned no readable text.</p>")
-    parts.extend(["</body>", "</html>"])
-    return "\n".join(parts)
+        '  <div class="wrap">',
+        f"    <h1>{escaped_title}</h1>",
+        f"    <div class=\"meta\"><strong>Summary:</strong> {html.escape(description)}</div>" if description else '    <div class="meta"></div>',
+        '    <div class="actions">',
+        f"      <a class=\"btn primary\" href=\"{escaped_source}\" target=\"_blank\" rel=\"noopener\">Open original PDF</a>",
+        f"      <a class=\"btn\" href=\"{escaped_source}\" download>Download PDF</a>",
+        '    </div>',
+        '    <div class="pdfbox">',
+        f"      <iframe src=\"{escaped_source}#view=FitH\" loading=\"lazy\" referrerpolicy=\"no-referrer\"></iframe>",
+        '    </div>',
+        '    <h2>Extracted text</h2>',
+        '    <div class="text">',
+        *text_block,
+        '    </div>',
+        '  </div>',
+        "</body>",
+        "</html>",
+    ])
 
 
 def build_content_html(source_link: str, description: str, paragraphs: list[str]) -> str:
