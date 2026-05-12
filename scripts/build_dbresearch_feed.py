@@ -355,7 +355,13 @@ def extract_article_text_from_jina(raw_text: str, title: str, description: str) 
     return clean_article_paragraphs(paragraphs, title, description)
 
 
-def build_local_page(title: str, source_link: str, description: str, paragraphs: list[str]) -> str:
+def build_local_page(
+    title: str,
+    source_link: str,
+    description: str,
+    paragraphs: list[str],
+    embedded_pdf_href: str | None,
+) -> str:
     escaped_title = html.escape(title)
     escaped_source = html.escape(source_link)
     text_block = []
@@ -364,6 +370,19 @@ def build_local_page(title: str, source_link: str, description: str, paragraphs:
             text_block.append(f"  <p>{html.escape(para)}</p>")
     else:
         text_block.append("  <p>PDF text extraction returned no readable text.</p>")
+
+    pdf_block = [
+        '    <div class="notice">Embedded preview unavailable for this item. Use the buttons above to open the PDF.</div>'
+    ]
+    if embedded_pdf_href:
+        escaped_embedded_pdf = html.escape(embedded_pdf_href)
+        pdf_block = [
+            '    <div class="pdfbox">',
+            f'      <object data="{escaped_embedded_pdf}#view=FitH" type="application/pdf">',
+            f'        <iframe src="{escaped_embedded_pdf}#view=FitH" loading="lazy"></iframe>',
+            '      </object>',
+            '    </div>',
+        ]
 
     return "\n".join([
         "<!doctype html>",
@@ -381,7 +400,8 @@ def build_local_page(title: str, source_link: str, description: str, paragraphs:
         '    .btn { display: inline-block; padding: 10px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; }',
         '    .btn.primary { background: #111; color: #fff; border-color: #111; }',
         '    .pdfbox { margin: 20px 0 28px; border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #f6f6f6; }',
-        '    iframe, embed { width: 100%; height: 80vh; border: 0; display: block; background: white; }',
+        '    iframe, embed, object { width: 100%; height: 80vh; border: 0; display: block; background: white; }',
+        '    .notice { margin: 20px 0 28px; padding: 14px 16px; border-radius: 10px; background: #fff8e1; border: 1px solid #f0d98c; color: #5f4700; }',
         '    h2 { margin-top: 32px; }',
         '    .text { max-width: 820px; line-height: 1.7; font-size: 16px; }',
         '    .text p { margin: 0 0 1em; }',
@@ -392,12 +412,11 @@ def build_local_page(title: str, source_link: str, description: str, paragraphs:
         f"    <h1>{escaped_title}</h1>",
         f"    <div class=\"meta\"><strong>Summary:</strong> {html.escape(description)}</div>" if description else '    <div class="meta"></div>',
         '    <div class="actions">',
-        f"      <a class=\"btn primary\" href=\"{escaped_source}\" target=\"_blank\" rel=\"noopener\">Open original PDF</a>",
-        f"      <a class=\"btn\" href=\"{escaped_source}\" download>Download PDF</a>",
+        f"      <a class=\"btn primary\" href=\"{html.escape(embedded_pdf_href or source_link)}\" target=\"_blank\" rel=\"noopener\">Open PDF</a>",
+        f"      <a class=\"btn\" href=\"{html.escape(embedded_pdf_href or source_link)}\" download>Download PDF</a>",
+        f"      <a class=\"btn\" href=\"{escaped_source}\" target=\"_blank\" rel=\"noopener\">Open original source</a>",
         '    </div>',
-        '    <div class="pdfbox">',
-        f"      <iframe src=\"{escaped_source}#view=FitH\" loading=\"lazy\" referrerpolicy=\"no-referrer\"></iframe>",
-        '    </div>',
+        *pdf_block,
         '    <h2>Extracted text</h2>',
         '    <div class="text">',
         *text_block,
@@ -521,6 +540,7 @@ def build_feed(site_dir: Path, public_base: str):
             local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
             paragraphs: list[str] = []
             extract_error = None
+            pdf_bytes: bytes | None = None
             try:
                 pdf_bytes = fetch_pdf_bytes(link)
                 paragraphs = clean_article_paragraphs(extract_pdf_paragraphs(pdf_bytes), title, description)
@@ -539,8 +559,12 @@ def build_feed(site_dir: Path, public_base: str):
 
             out_dir = site_dir / "item" / FEED_NAME / slug
             out_dir.mkdir(parents=True, exist_ok=True)
+            local_pdf_href = None
+            if pdf_bytes:
+                (out_dir / "original.pdf").write_bytes(pdf_bytes)
+                local_pdf_href = "original.pdf"
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, description, paragraphs),
+                build_local_page(title, link, description, paragraphs, local_pdf_href),
                 encoding="utf-8",
             )
 
