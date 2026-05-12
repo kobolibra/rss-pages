@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import hashlib
 import html
 import io
@@ -13,7 +14,9 @@ from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
 import feedparser
+import fitz
 import requests
+from playwright.async_api import async_playwright
 from pypdf import PdfReader
 
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
@@ -35,6 +38,8 @@ USER_AGENT = os.environ.get(
 HEADERS = {
     "User-Agent": USER_AGENT,
 }
+
+BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_BROWSER_FALLBACK", "1") != "0"
 
 
 def qname_local(tag: str) -> str:
@@ -355,12 +360,29 @@ def extract_article_text_from_jina(raw_text: str, title: str, description: str) 
     return clean_article_paragraphs(paragraphs, title, description)
 
 
+def render_pdf_pages(pdf_bytes: bytes, out_dir: Path, max_pages: int = 80) -> list[str]:
+    page_hrefs: list[str] = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        total = min(len(doc), max_pages)
+        for i in range(total):
+            page = doc.load_page(i)
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+            name = f"page-{i+1:03d}.png"
+            (out_dir / name).write_bytes(pix.tobytes("png"))
+            page_hrefs.append(name)
+    finally:
+        doc.close()
+    return page_hrefs
+
+
 def build_local_page(
     title: str,
     source_link: str,
     description: str,
     paragraphs: list[str],
     embedded_pdf_href: str | None,
+    rendered_page_hrefs: list[str] | None = None,
 ) -> str:
     escaped_title = html.escape(title)
     escaped_source = html.escape(source_link)
@@ -374,7 +396,16 @@ def build_local_page(
     pdf_block = [
         '    <div class="notice">Embedded preview unavailable for this item. Use the buttons above to open the PDF.</div>'
     ]
-    if embedded_pdf_href:
+    if rendered_page_hrefs:
+        rendered = ['    <div class="page-images">']
+        for idx, href in enumerate(rendered_page_hrefs, start=1):
+            rendered.append('      <figure class="page-image">')
+            rendered.append(f'        <img src="{html.escape(href)}" alt="PDF page {idx}" loading="lazy">')
+            rendered.append(f'        <figcaption>Page {idx}</figcaption>')
+            rendered.append('      </figure>')
+        rendered.append('    </div>')
+        pdf_block = rendered
+    elif embedded_pdf_href:
         escaped_embedded_pdf = html.escape(embedded_pdf_href)
         pdf_block = [
             '    <div class="pdfbox">',
@@ -401,6 +432,10 @@ def build_local_page(
         '    .btn.primary { background: #111; color: #fff; border-color: #111; }',
         '    .pdfbox { margin: 20px 0 28px; border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #f6f6f6; }',
         '    iframe, embed, object { width: 100%; height: 80vh; border: 0; display: block; background: white; }',
+        '    .page-images { display: grid; gap: 18px; margin: 20px 0 28px; }',
+        '    .page-image { margin: 0; border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #fafafa; }',
+        '    .page-image img { display: block; width: 100%; height: auto; background: white; }',
+        '    .page-image figcaption { padding: 8px 12px; font-size: 13px; color: #555; border-top: 1px solid #eee; }',
         '    .notice { margin: 20px 0 28px; padding: 14px 16px; border-radius: 10px; background: #fff8e1; border: 1px solid #f0d98c; color: #5f4700; }',
         '    h2 { margin-top: 32px; }',
         '    .text { max-width: 820px; line-height: 1.7; font-size: 16px; }',
@@ -464,6 +499,47 @@ def try_fetch_binary_pdf(session: requests.Session, target_url: str, referer: st
     raise ValueError(f"unexpected content-type for PDF binary: {content_type or 'unknown'}")
 
 
+async def _fetch_pdf_via_browser(url: str) -> bytes:
+    viewer_url = url
+    if is_pdf_url(url):
+        parsed = urlparse(url)
+        prod_id = re.search(r"(PROD\d+)", parsed.path or "")
+        if prod_id:
+            viewer_url = f"https://www.dbresearch.com/PROD/IE-PROD/PDFVIEWER.calias?pdfViewerPdfUrl={prod_id.group(1)}&rwnode=REPORT"
+
+    captured: list[bytes] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=USER_AGENT)
+        page = await context.new_page()
+
+        async def handle_response(response):
+            try:
+                resp_url = response.url or ""
+                ctype = (response.headers.get("content-type") or "").lower()
+                if ".pdf" not in resp_url.lower() and "application/pdf" not in ctype:
+                    return
+                body = await response.body()
+                if body and len(body) > 1000 and body[:4] == b"%PDF":
+                    captured.append(body)
+            except Exception:
+                return
+
+        page.on("response", handle_response)
+        await page.goto(viewer_url, wait_until="networkidle", timeout=REQUEST_TIMEOUT * 1000)
+        await page.wait_for_timeout(3000)
+        await browser.close()
+
+    if captured:
+        return max(captured, key=len)
+    raise ValueError("browser fallback could not capture PDF response")
+
+
+def fetch_pdf_via_browser(url: str) -> bytes:
+    return asyncio.run(_fetch_pdf_via_browser(url))
+
+
 def fetch_pdf_bytes(url: str) -> bytes:
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -480,7 +556,10 @@ def fetch_pdf_bytes(url: str) -> bytes:
     m_pdf = re.search(r"var\s+pdfUrl\s*=\s*'([^']+)'", page_html)
     if m_pdf:
         direct_url = urljoin(response.url, html.unescape(m_pdf.group(1)))
-        return try_fetch_binary_pdf(session, direct_url, referer=response.url)
+        try:
+            return try_fetch_binary_pdf(session, direct_url, referer=response.url)
+        except Exception:
+            pass
 
     m_canonical = re.search(r'<link\s+rel="canonical"\s+href="([^"]+\.pdf[^"]*)"', page_html, re.I)
     if m_canonical:
@@ -489,6 +568,13 @@ def fetch_pdf_bytes(url: str) -> bytes:
             return try_fetch_binary_pdf(session, direct_url, referer=response.url)
         except Exception:
             pass
+
+    if BROWSER_FALLBACK_ENABLED:
+        try:
+            print(f"INFO: trying browser PDF capture fallback for {url}")
+            return fetch_pdf_via_browser(url)
+        except Exception as exc:
+            print(f"WARN: browser PDF capture fallback failed for {url}: {exc}")
 
     raise ValueError("could not resolve real PDF binary URL from DB viewer page")
 
@@ -560,11 +646,22 @@ def build_feed(site_dir: Path, public_base: str):
             out_dir = site_dir / "item" / FEED_NAME / slug
             out_dir.mkdir(parents=True, exist_ok=True)
             local_pdf_href = None
+            rendered_page_hrefs: list[str] = []
+            existing_pdf_path = out_dir / "original.pdf"
             if pdf_bytes:
-                (out_dir / "original.pdf").write_bytes(pdf_bytes)
+                existing_pdf_path.write_bytes(pdf_bytes)
+            elif existing_pdf_path.exists() and existing_pdf_path.stat().st_size > 1000:
+                pdf_bytes = existing_pdf_path.read_bytes()
+                print(f"INFO: reusing existing local PDF for {link}")
+
+            if pdf_bytes:
                 local_pdf_href = "original.pdf"
+                try:
+                    rendered_page_hrefs = render_pdf_pages(pdf_bytes, out_dir)
+                except Exception as exc:
+                    print(f"WARN: failed to render PDF pages for {link}: {exc}")
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, description, paragraphs, local_pdf_href),
+                build_local_page(title, link, description, paragraphs, local_pdf_href, rendered_page_hrefs),
                 encoding="utf-8",
             )
 
