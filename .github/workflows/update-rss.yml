@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyyaml feedparser beautifulsoup4 playwright
+          pip install requests pyyaml feedparser beautifulsoup4 playwright pypdf
 
       - name: Prepare dirs
         run: |
@@ -72,6 +72,8 @@ jobs:
           fi
 
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing,natixis_insights"
+          python scripts/build_with_live_fallback.py "$BASE_URL" site dbresearch_global_search 1 \
+            python scripts/build_dbresearch_feed.py site "$BASE_URL"
           python scripts/build_with_live_fallback.py "$BASE_URL" site barclays_weekly_insights 1 \
             python scripts/build_barclays_feed.py site "$BASE_URL"
           python scripts/build_with_live_fallback.py "$BASE_URL" site gsam 1 \
@@ -79,11 +81,11 @@ jobs:
           python scripts/build_with_live_fallback.py "$BASE_URL" site dws_cio 1 \
             python scripts/build_dws_cio_feed.py site "$BASE_URL"
 
-      - name: Preserve unchanged Barclays / BlackRock outputs
+      - name: Preserve unchanged feeds
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights"
+          python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights,dbresearch_global_search"
 
       - name: Validate generated feeds (restore last known-good on regression)
         run: |
@@ -112,6 +114,7 @@ jobs:
               <li><a href="natixis_insights.xml">Natixis Insights</a></li>
               <li><a href="gsam.xml">gsam</a></li>
               <li><a href="dws_cio.xml">dws_cio</a></li>
+              <li><a href="dbresearch_global_search.xml">dbresearch_global_search</a></li>
             </ul>
           </body>
           </html>
