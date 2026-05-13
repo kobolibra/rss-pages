@@ -27,7 +27,7 @@ SOURCE_FEED_URL = os.environ.get(
     "DBRESEARCH_SOURCE_FEED_URL",
     "https://rssweball.top/feed/b706ef15-fa4f-45b2-a1fd-4cd8d037e91c.xml",
 )
-FEED_NAME = os.environ.get("DBRESEARCH_FEED_NAME", "dbresearch_global_search")
+FEED_NAME = os.environ.get("DBRESEARCH_FEED_NAME", "dbresearch")
 OUTPUT_FILE = os.environ.get("DBRESEARCH_OUTPUT_FILE", f"{FEED_NAME}.xml")
 MAX_ITEMS = int(os.environ.get("DBRESEARCH_MAX_ITEMS", "40"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_TIMEOUT", "60"))
@@ -384,6 +384,18 @@ def extract_article_text_from_jina(raw_text: str, title: str, description: str) 
 
     paragraphs = extract_text_paragraphs("\n".join(lines))
     return clean_article_paragraphs(paragraphs, title, description)
+
+
+def fallback_jina_paragraphs(link: str, title: str, description: str) -> list[str]:
+    try:
+        jina_text = fetch_jina_text(link)
+        paragraphs = extract_article_text_from_jina(jina_text, title, description)
+        if paragraphs:
+            print(f"INFO: used Jina text fallback for {link}")
+        return paragraphs
+    except Exception as exc:
+        print(f"WARN: Jina fallback also failed for {link}: {exc}")
+        return []
 
 
 def render_pdf_pages(pdf_bytes: bytes, out_dir: Path, max_pages: int = 80) -> list[str]:
