@@ -452,7 +452,6 @@ def build_local_page(
         '    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #111; background: #fff; }',
         '    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }',
         '    h1 { line-height: 1.2; margin: 0 0 12px; }',
-        '    .meta { color: #444; margin-bottom: 18px; }',
         '    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0 20px; }',
         '    .btn { display: inline-block; padding: 10px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; }',
         '    .btn.primary { background: #111; color: #fff; border-color: #111; }',
@@ -471,7 +470,6 @@ def build_local_page(
         "<body>",
         '  <div class="wrap">',
         f"    <h1>{escaped_title}</h1>",
-        f"    <div class=\"meta\"><strong>Summary:</strong> {html.escape(description)}</div>" if description else '    <div class="meta"></div>',
         '    <div class="actions">',
         f"      <a class=\"btn primary\" href=\"{html.escape(embedded_pdf_href or source_link)}\" target=\"_blank\" rel=\"noopener\">Open PDF</a>",
         f"      <a class=\"btn\" href=\"{html.escape(embedded_pdf_href or source_link)}\" download>Download PDF</a>",
@@ -696,7 +694,6 @@ def build_feed(site_dir: Path, public_base: str):
             guid_el.text = guid
 
         ET.SubElement(item, "pubDate").text = pub_date
-        ET.SubElement(item, "description").text = description or title
         total_count += 1
 
     for child in item_root.iterdir():
