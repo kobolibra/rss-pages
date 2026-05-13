@@ -5,6 +5,7 @@ import html
 import io
 import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -487,31 +488,6 @@ def build_local_page(
     ])
 
 
-def build_content_html(source_link: str, description: str, paragraphs: list[str]) -> str:
-    parts = []
-    if source_link:
-        parts.append(f"<p><strong>Source PDF:</strong> {html.escape(source_link)}</p>")
-    if description:
-        parts.append(f"<p><strong>Summary:</strong> {html.escape(description)}</p>")
-    for para in paragraphs:
-        parts.append(f"<p>{html.escape(para)}</p>")
-    if not parts:
-        parts.append("<p>PDF text extraction returned no readable text.</p>")
-    return "".join(parts)
-
-
-def fallback_jina_paragraphs(link: str, title: str, description: str) -> list[str]:
-    try:
-        jina_text = fetch_jina_text(link)
-        paragraphs = extract_article_text_from_jina(jina_text, title, description)
-        if paragraphs:
-            print(f"INFO: used Jina text fallback for {link}")
-        return paragraphs
-    except Exception as exc:
-        print(f"WARN: Jina fallback also failed for {link}: {exc}")
-        return []
-
-
 def try_fetch_binary_pdf(session: requests.Session, target_url: str, referer: str = "") -> bytes:
     headers = dict(HEADERS)
     if referer:
@@ -623,6 +599,8 @@ def build_feed(site_dir: Path, public_base: str):
     channel_description = parsed.feed.get("subtitle") or parsed.feed.get("description") or "DB Research feed with local PDF full text pages"
     channel_language = parsed.feed.get("language") or "en"
     channel_link = f"{public_base}/{OUTPUT_FILE}" if public_base else SOURCE_FEED_URL
+    item_root = site_dir / "item" / FEED_NAME
+    item_root.mkdir(parents=True, exist_ok=True)
 
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
@@ -635,6 +613,7 @@ def build_feed(site_dir: Path, public_base: str):
 
     pdf_count = 0
     total_count = 0
+    current_slugs: set[str] = set()
 
     for entry in parsed.entries[:MAX_ITEMS]:
         title = normalize_space(entry.get("title", "Untitled")) or "Untitled"
@@ -649,7 +628,8 @@ def build_feed(site_dir: Path, public_base: str):
         if is_pdf_url(link):
             slug = entry_slug(title, link, guid)
             local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
-            out_dir = site_dir / "item" / FEED_NAME / slug
+            current_slugs.add(slug)
+            out_dir = item_root / slug
             out_dir.mkdir(parents=True, exist_ok=True)
 
             extract_error = None
@@ -708,18 +688,21 @@ def build_feed(site_dir: Path, public_base: str):
             guid_el = ET.SubElement(item, "guid")
             guid_el.set("isPermaLink", "true")
             guid_el.text = local_url
-            content_html = None
             pdf_count += 1
         else:
             ET.SubElement(item, "link").text = link
             guid_el = ET.SubElement(item, "guid")
             guid_el.set("isPermaLink", "true" if guid == link and link.startswith("http") else "false")
             guid_el.text = guid
-            content_html = None
 
         ET.SubElement(item, "pubDate").text = pub_date
         ET.SubElement(item, "description").text = description or title
         total_count += 1
+
+    for child in item_root.iterdir():
+        if child.is_dir() and child.name not in current_slugs:
+            shutil.rmtree(child)
+            print(f"removed stale item dir: {child}")
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     output_path = site_dir / OUTPUT_FILE
