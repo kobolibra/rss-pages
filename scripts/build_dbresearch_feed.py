@@ -192,6 +192,15 @@ def extract_pdf_paragraphs(pdf_bytes: bytes) -> list[str]:
     return paragraphs
 
 
+def extract_pdf_paragraphs_via_fitz(pdf_bytes: bytes) -> list[str]:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        text = "\n\n".join((page.get_text("text") or "") for page in doc)
+    finally:
+        doc.close()
+    return extract_text_paragraphs(text)
+
+
 def clean_article_paragraphs(paragraphs: list[str], title: str, description: str) -> list[str]:
     cleaned: list[str] = []
     title_n = normalize_space(title)
@@ -298,6 +307,22 @@ def clean_article_paragraphs(paragraphs: list[str], title: str, description: str
     return deduped
 
 
+def extract_best_pdf_paragraphs(pdf_bytes: bytes, title: str, description: str) -> list[str]:
+    candidates: list[list[str]] = []
+    try:
+        candidates.append(clean_article_paragraphs(extract_pdf_paragraphs(pdf_bytes), title, description))
+    except Exception:
+        pass
+    try:
+        candidates.append(clean_article_paragraphs(extract_pdf_paragraphs_via_fitz(pdf_bytes), title, description))
+    except Exception:
+        pass
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return []
+    return max(candidates, key=lambda paras: sum(len(p) for p in paras))
+
+
 def fetch_jina_text(url: str) -> str:
     jina_url = f"https://r.jina.ai/http://{url}"
     response = requests.get(jina_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
@@ -380,11 +405,18 @@ def build_local_page(
     title: str,
     source_link: str,
     description: str,
+    paragraphs: list[str],
     embedded_pdf_href: str | None,
     rendered_page_hrefs: list[str] | None = None,
 ) -> str:
     escaped_title = html.escape(title)
     escaped_source = html.escape(source_link)
+    text_block = []
+    if paragraphs:
+        for para in paragraphs:
+            text_block.append(f"  <p>{html.escape(para)}</p>")
+    else:
+        text_block.append("  <p>Full-text extraction is currently unavailable for this item.</p>")
 
     pdf_block = [
         '    <div class="notice">Embedded preview unavailable for this item. Use the buttons above to open the PDF.</div>'
@@ -430,6 +462,9 @@ def build_local_page(
         '    .page-image img { display: block; width: 100%; height: auto; background: white; }',
         '    .page-image figcaption { padding: 8px 12px; font-size: 13px; color: #555; border-top: 1px solid #eee; }',
         '    .notice { margin: 20px 0 28px; padding: 14px 16px; border-radius: 10px; background: #fff8e1; border: 1px solid #f0d98c; color: #5f4700; }',
+        '    h2 { margin-top: 32px; }',
+        '    .text { max-width: 820px; line-height: 1.7; font-size: 16px; }',
+        '    .text p { margin: 0 0 1em; }',
         '  </style>',
         "</head>",
         "<body>",
@@ -442,6 +477,10 @@ def build_local_page(
         f"      <a class=\"btn\" href=\"{escaped_source}\" target=\"_blank\" rel=\"noopener\">Open original source</a>",
         '    </div>',
         *pdf_block,
+        '    <h2>Extracted text</h2>',
+        '    <div class="text">',
+        *text_block,
+        '    </div>',
         '  </div>',
         "</body>",
         "</html>",
@@ -610,17 +649,37 @@ def build_feed(site_dir: Path, public_base: str):
         if is_pdf_url(link):
             slug = entry_slug(title, link, guid)
             local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
-            paragraphs: list[str] = []
+            out_dir = site_dir / "item" / FEED_NAME / slug
+            out_dir.mkdir(parents=True, exist_ok=True)
+
             extract_error = None
+            fetch_error = None
             pdf_bytes: bytes | None = None
+            existing_pdf_path = out_dir / "original.pdf"
+
             try:
                 pdf_bytes = fetch_pdf_bytes(link)
-                paragraphs = clean_article_paragraphs(extract_pdf_paragraphs(pdf_bytes), title, description)
+            except Exception as exc:
+                fetch_error = exc
+                extract_error = exc
+                print(f"WARN: failed to fetch PDF binary for {link}: {exc}")
+
+            if pdf_bytes:
+                existing_pdf_path.write_bytes(pdf_bytes)
+            elif existing_pdf_path.exists() and existing_pdf_path.stat().st_size > 1000:
+                pdf_bytes = existing_pdf_path.read_bytes()
+                print(f"INFO: reusing existing local PDF for {link}")
+
+            paragraphs: list[str] = []
+            if pdf_bytes:
+                try:
+                    paragraphs = extract_best_pdf_paragraphs(pdf_bytes, title, description)
+                except Exception as exc:
+                    extract_error = exc
+                    print(f"WARN: failed to extract PDF text for {link}: {exc}")
                 if not paragraphs:
                     paragraphs = fallback_jina_paragraphs(link, title, description)
-            except Exception as exc:
-                extract_error = exc
-                print(f"WARN: failed to extract PDF binary text for {link}: {exc}")
+            else:
                 paragraphs = fallback_jina_paragraphs(link, title, description)
 
             if extract_error and not description:
@@ -629,25 +688,19 @@ def build_feed(site_dir: Path, public_base: str):
             if not description:
                 description = shorten(paragraphs[0] if paragraphs else title)
 
-            out_dir = site_dir / "item" / FEED_NAME / slug
-            out_dir.mkdir(parents=True, exist_ok=True)
             local_pdf_href = None
             rendered_page_hrefs: list[str] = []
-            existing_pdf_path = out_dir / "original.pdf"
-            if pdf_bytes:
-                existing_pdf_path.write_bytes(pdf_bytes)
-            elif existing_pdf_path.exists() and existing_pdf_path.stat().st_size > 1000:
-                pdf_bytes = existing_pdf_path.read_bytes()
-                print(f"INFO: reusing existing local PDF for {link}")
-
             if pdf_bytes:
                 local_pdf_href = "original.pdf"
                 try:
                     rendered_page_hrefs = render_pdf_pages(pdf_bytes, out_dir)
                 except Exception as exc:
                     print(f"WARN: failed to render PDF pages for {link}: {exc}")
+            elif fetch_error and not paragraphs:
+                paragraphs = ["Full-text extraction is currently unavailable for this item because the source PDF could not be captured and no local PDF cache was available."]
+
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, description, local_pdf_href, rendered_page_hrefs),
+                build_local_page(title, link, description, paragraphs, local_pdf_href, rendered_page_hrefs),
                 encoding="utf-8",
             )
 
@@ -662,12 +715,10 @@ def build_feed(site_dir: Path, public_base: str):
             guid_el = ET.SubElement(item, "guid")
             guid_el.set("isPermaLink", "true" if guid == link and link.startswith("http") else "false")
             guid_el.text = guid
-            content_html = f"<p>{html.escape(description or title)}</p>"
+            content_html = None
 
         ET.SubElement(item, "pubDate").text = pub_date
         ET.SubElement(item, "description").text = description or title
-        if content_html:
-            ET.SubElement(item, qname_local("encoded")).text = content_html
         total_count += 1
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")

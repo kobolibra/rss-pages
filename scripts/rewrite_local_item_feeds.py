@@ -199,8 +199,6 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
             ET.SubElement(it, "author").text = item["author"]
         if item["description"]:
             ET.SubElement(it, "description").text = item["description"]
-        if item["content_html"]:
-            ET.SubElement(it, qname_local("encoded")).text = item["content_html"]
 
     pretty = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     xml_path.write_bytes(pretty)
