@@ -29,6 +29,7 @@ SOURCE_FEED_URL = os.environ.get(
 )
 FEED_NAME = os.environ.get("DBRESEARCH_FEED_NAME", "dbresearch")
 OUTPUT_FILE = os.environ.get("DBRESEARCH_OUTPUT_FILE", f"{FEED_NAME}.xml")
+LEGACY_FEED_NAMES = [name.strip() for name in os.environ.get("DBRESEARCH_LEGACY_FEED_NAMES", "dbresearch_global_search").split(",") if name.strip()]
 MAX_ITEMS = int(os.environ.get("DBRESEARCH_MAX_ITEMS", "40"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_TIMEOUT", "60"))
 USER_AGENT = os.environ.get(
@@ -398,6 +399,15 @@ def fallback_jina_paragraphs(link: str, title: str, description: str) -> list[st
         return []
 
 
+def load_legacy_pdf_bytes(site_dir: Path, slug: str, link: str) -> bytes | None:
+    for legacy_name in LEGACY_FEED_NAMES:
+        legacy_pdf_path = site_dir / "item" / legacy_name / slug / "original.pdf"
+        if legacy_pdf_path.exists() and legacy_pdf_path.stat().st_size > 1000:
+            print(f"INFO: reusing legacy local PDF for {link} from {legacy_pdf_path}")
+            return legacy_pdf_path.read_bytes()
+    return None
+
+
 def render_pdf_pages(pdf_bytes: bytes, out_dir: Path, max_pages: int = 80) -> list[str]:
     page_hrefs: list[str] = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -659,6 +669,10 @@ def build_feed(site_dir: Path, public_base: str):
             elif existing_pdf_path.exists() and existing_pdf_path.stat().st_size > 1000:
                 pdf_bytes = existing_pdf_path.read_bytes()
                 print(f"INFO: reusing existing local PDF for {link}")
+            else:
+                pdf_bytes = load_legacy_pdf_bytes(site_dir, slug, link)
+                if pdf_bytes:
+                    existing_pdf_path.write_bytes(pdf_bytes)
 
             paragraphs: list[str] = []
             if pdf_bytes:
