@@ -380,18 +380,11 @@ def build_local_page(
     title: str,
     source_link: str,
     description: str,
-    paragraphs: list[str],
     embedded_pdf_href: str | None,
     rendered_page_hrefs: list[str] | None = None,
 ) -> str:
     escaped_title = html.escape(title)
     escaped_source = html.escape(source_link)
-    text_block = []
-    if paragraphs:
-        for para in paragraphs:
-            text_block.append(f"  <p>{html.escape(para)}</p>")
-    else:
-        text_block.append("  <p>PDF text extraction returned no readable text.</p>")
 
     pdf_block = [
         '    <div class="notice">Embedded preview unavailable for this item. Use the buttons above to open the PDF.</div>'
@@ -437,9 +430,6 @@ def build_local_page(
         '    .page-image img { display: block; width: 100%; height: auto; background: white; }',
         '    .page-image figcaption { padding: 8px 12px; font-size: 13px; color: #555; border-top: 1px solid #eee; }',
         '    .notice { margin: 20px 0 28px; padding: 14px 16px; border-radius: 10px; background: #fff8e1; border: 1px solid #f0d98c; color: #5f4700; }',
-        '    h2 { margin-top: 32px; }',
-        '    .text { max-width: 820px; line-height: 1.7; font-size: 16px; }',
-        '    .text p { margin: 0 0 1em; }',
         '  </style>',
         "</head>",
         "<body>",
@@ -452,10 +442,6 @@ def build_local_page(
         f"      <a class=\"btn\" href=\"{escaped_source}\" target=\"_blank\" rel=\"noopener\">Open original source</a>",
         '    </div>',
         *pdf_block,
-        '    <h2>Extracted text</h2>',
-        '    <div class="text">',
-        *text_block,
-        '    </div>',
         '  </div>',
         "</body>",
         "</html>",
@@ -661,7 +647,7 @@ def build_feed(site_dir: Path, public_base: str):
                 except Exception as exc:
                     print(f"WARN: failed to render PDF pages for {link}: {exc}")
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, description, paragraphs, local_pdf_href, rendered_page_hrefs),
+                build_local_page(title, link, description, local_pdf_href, rendered_page_hrefs),
                 encoding="utf-8",
             )
 
