@@ -141,3 +141,21 @@ if 'appeared first on' in trivium_text.lower():
     fail('Trivium still contains boilerplate footer')
 
 print('VALIDATION OK')
+
+# Citadel: local item-page feed with usable full text on page
+citadel_path = SITE / 'citadel_market_insights.xml'
+if citadel_path.exists():
+    citadel = read_first_item('citadel_market_insights')
+    citadel_link = (citadel.findtext('link') or '').strip()
+    citadel_desc = strip_html(citadel.findtext('description') or '')
+    assert_localized_link('citadel_market_insights', citadel_link)
+    if len(citadel_desc) < 80:
+        fail(f'Citadel description unexpectedly short: {len(citadel_desc)} chars')
+    citadel_local_path = resolve_local_item_path(citadel_link)
+    if not citadel_local_path.exists():
+        fail(f'Citadel local item page missing: {citadel_local_path}')
+    citadel_page_text = strip_html(citadel_local_path.read_text(encoding='utf-8'))
+    if len(citadel_page_text) < 800:
+        fail(f'Citadel local item page unexpectedly short: {len(citadel_page_text)} chars')
+
+print('VALIDATION OK')

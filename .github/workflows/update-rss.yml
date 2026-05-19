@@ -80,6 +80,8 @@ jobs:
             python scripts/build_gsam_insights_feed.py site "$BASE_URL"
           python scripts/build_with_live_fallback.py "$BASE_URL" site dws_cio 1 \
             python scripts/build_dws_cio_feed.py site "$BASE_URL"
+          python scripts/build_with_live_fallback.py "$BASE_URL" site citadel_market_insights 1 \
+            python scripts/build_citadel_market_insights_feed.py site "$BASE_URL"
 
       - name: Preserve unchanged feeds
         run: |
@@ -115,6 +117,7 @@ jobs:
               <li><a href="gsam.xml">gsam</a></li>
               <li><a href="dws_cio.xml">dws_cio</a></li>
               <li><a href="dbresearch.xml">dbresearch</a></li>
+              <li><a href="citadel_market_insights.xml">citadel_market_insights</a></li>
             </ul>
           </body>
           </html>
