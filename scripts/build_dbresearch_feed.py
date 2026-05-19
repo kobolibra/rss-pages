@@ -5,7 +5,6 @@ import html
 import io
 import os
 import re
-import shutil
 import sys
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -42,6 +41,12 @@ HEADERS = {
 }
 
 BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_BROWSER_FALLBACK", "1") != "0"
+
+
+def fetch_bytes(url: str, timeout: int = REQUEST_TIMEOUT) -> bytes:
+    response = requests.get(url, headers=HEADERS, timeout=timeout)
+    response.raise_for_status()
+    return response.content
 
 
 def qname_local(tag: str) -> str:
@@ -608,6 +613,95 @@ def entry_slug(entry_title: str, entry_link: str, entry_guid: str) -> str:
     return f"{base}-{suffix}"
 
 
+def parse_existing_feed(xml_path: Path) -> list[dict]:
+    root = ET.parse(xml_path).getroot()
+    channel = root.find("channel")
+    if channel is None:
+        return []
+
+    items: list[dict] = []
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        guid = (item.findtext("guid") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        slug = None
+        parts = [p for p in urlparse(link).path.split("/") if p]
+        if "item" in parts:
+            idx = parts.index("item")
+            if len(parts) > idx + 2 and parts[idx + 1] == FEED_NAME:
+                slug = parts[idx + 2]
+        items.append(
+            {
+                "title": title,
+                "link": link,
+                "guid": guid,
+                "pub_date": pub_date,
+                "slug": slug,
+            }
+        )
+    return items
+
+
+def restore_live_feed(public_base: str, site_dir: Path) -> bool:
+    feed_url = f"{public_base.rstrip('/')}/{OUTPUT_FILE}"
+    output_path = site_dir / OUTPUT_FILE
+    try:
+        xml_bytes = fetch_bytes(feed_url, timeout=30)
+    except Exception:
+        return False
+
+    output_path.write_bytes(xml_bytes)
+
+    try:
+        root = ET.fromstring(xml_bytes)
+        channel = root.find("channel")
+        if channel is None:
+            return True
+        for item in channel.findall("item"):
+            link = (item.findtext("link") or "").strip()
+            if not link.startswith(public_base.rstrip("/") + f"/item/{FEED_NAME}/"):
+                continue
+            try:
+                item_bytes = fetch_bytes(link, timeout=30)
+            except Exception:
+                continue
+            item_rel = urlparse(link).path.lstrip("/")
+            item_dir = site_dir / item_rel
+            item_dir.mkdir(parents=True, exist_ok=True)
+            (item_dir / "index.html").write_bytes(item_bytes)
+
+            html_text = item_bytes.decode("utf-8", errors="ignore")
+            refs = set(re.findall(r'(?:src|href)="([^"]+)"', html_text))
+            for ref in refs:
+                if not ref or ref.startswith(("http://", "https://", "#", "data:")):
+                    continue
+                asset_url = urljoin(link, ref)
+                try:
+                    asset_bytes = fetch_bytes(asset_url, timeout=30)
+                except Exception:
+                    continue
+                asset_rel = urlparse(asset_url).path.lstrip("/")
+                asset_path = site_dir / asset_rel
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                asset_path.write_bytes(asset_bytes)
+    except Exception:
+        pass
+    return True
+
+
+def load_existing_items(site_dir: Path, public_base: str) -> list[dict]:
+    output_path = site_dir / OUTPUT_FILE
+    if not output_path.exists():
+        restore_live_feed(public_base, site_dir)
+    if not output_path.exists():
+        return []
+    try:
+        return parse_existing_feed(output_path)
+    except Exception:
+        return []
+
+
 def build_feed(site_dir: Path, public_base: str):
     print(f"Fetching source feed: {SOURCE_FEED_URL}")
     parsed = feedparser.parse(SOURCE_FEED_URL)
@@ -622,6 +716,11 @@ def build_feed(site_dir: Path, public_base: str):
     item_root = site_dir / "item" / FEED_NAME
     item_root.mkdir(parents=True, exist_ok=True)
 
+    output_path = site_dir / OUTPUT_FILE
+    existing_items = load_existing_items(site_dir, public_base)
+    existing_guid_map = {item["guid"]: item for item in existing_items if item.get("guid")}
+    existing_slug_map = {item["slug"]: item for item in existing_items if item.get("slug")}
+
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = channel_title
@@ -633,7 +732,8 @@ def build_feed(site_dir: Path, public_base: str):
 
     pdf_count = 0
     total_count = 0
-    current_slugs: set[str] = set()
+    new_count = 0
+    output_items: list[dict] = []
 
     for entry in parsed.entries[:MAX_ITEMS]:
         title = normalize_space(entry.get("title", "Untitled")) or "Untitled"
@@ -642,13 +742,30 @@ def build_feed(site_dir: Path, public_base: str):
         guid = (entry.get("id") or entry.get("guid") or link or title).strip()
         pub_date = parse_pub_date(entry.get("published", "") or entry.get("updated", ""))
 
-        item = ET.SubElement(channel, "item")
-        ET.SubElement(item, "title").text = title
+        existing_item = existing_guid_map.get(guid)
+        slug = entry_slug(title, link, guid) if is_pdf_url(link) else None
+        if not existing_item and slug:
+            existing_item = existing_slug_map.get(slug)
+        if existing_item:
+            output_items.append(
+                {
+                    "title": existing_item.get("title") or title,
+                    "link": existing_item.get("link") or link,
+                    "guid": existing_item.get("guid") or guid,
+                    "pub_date": existing_item.get("pub_date") or pub_date,
+                    "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
+                }
+            )
+            total_count += 1
+            continue
+
+        final_link = link
+        final_guid = guid
+        is_permalink = bool(guid == link and link.startswith("http"))
 
         if is_pdf_url(link):
-            slug = entry_slug(title, link, guid)
+            assert slug is not None
             local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
-            current_slugs.add(slug)
             out_dir = item_root / slug
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -708,29 +825,39 @@ def build_feed(site_dir: Path, public_base: str):
                 encoding="utf-8",
             )
 
-            ET.SubElement(item, "link").text = local_url
-            guid_el = ET.SubElement(item, "guid")
-            guid_el.set("isPermaLink", "true")
-            guid_el.text = local_url
+            final_link = local_url
+            final_guid = local_url
+            is_permalink = True
             pdf_count += 1
-        else:
-            ET.SubElement(item, "link").text = link
-            guid_el = ET.SubElement(item, "guid")
-            guid_el.set("isPermaLink", "true" if guid == link and link.startswith("http") else "false")
-            guid_el.text = guid
+            new_count += 1
 
-        ET.SubElement(item, "pubDate").text = pub_date
+        output_items.append(
+            {
+                "title": title,
+                "link": final_link,
+                "guid": final_guid,
+                "pub_date": pub_date,
+                "is_permalink": is_permalink,
+            }
+        )
         total_count += 1
 
-    for child in item_root.iterdir():
-        if child.is_dir() and child.name not in current_slugs:
-            shutil.rmtree(child)
-            print(f"removed stale item dir: {child}")
+    for item in output_items:
+        rss_item = ET.SubElement(channel, "item")
+        ET.SubElement(rss_item, "title").text = item["title"]
+        ET.SubElement(rss_item, "link").text = item["link"]
+        guid_el = ET.SubElement(rss_item, "guid")
+        guid_el.set("isPermaLink", "true" if item["is_permalink"] else "false")
+        guid_el.text = item["guid"]
+        ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
+
+    if new_count == 0 and output_path.exists():
+        print(f"no new {FEED_NAME} items; kept existing feed and item pages")
+        return
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
-    output_path = site_dir / OUTPUT_FILE
     output_path.write_bytes(xml_bytes)
-    print(f"Saved {output_path} (items={total_count}, pdf_localized={pdf_count})")
+    print(f"Saved {output_path} incrementally (items={total_count}, new_localized={new_count}, pdf_localized={pdf_count})")
 
 
 if __name__ == "__main__":

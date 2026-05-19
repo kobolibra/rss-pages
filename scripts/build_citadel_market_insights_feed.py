@@ -198,6 +198,55 @@ def build_item_page(title: str, source_url: str, published_iso: str | None, body
 """
 
 
+def local_site_rel_from_url(public_base: str, url: str) -> str:
+    item_path = urlparse(url).path
+    base_path = urlparse(public_base.rstrip("/")).path.rstrip("/")
+    if base_path and item_path.startswith(base_path):
+        item_path = item_path[len(base_path):]
+    return item_path.lstrip("/")
+
+
+def item_slug_from_local_url(link: str) -> str | None:
+    parts = [p for p in urlparse(link).path.split("/") if p]
+    if "item" not in parts:
+        return None
+    idx = parts.index("item")
+    if len(parts) <= idx + 2:
+        return None
+    if parts[idx + 1] != FEED_NAME:
+        return None
+    return parts[idx + 2]
+
+
+def parse_existing_items(xml_path: Path) -> list[dict]:
+    root = ET.parse(xml_path).getroot()
+    channel = root.find("channel")
+    if channel is None:
+        return []
+
+    items: list[dict] = []
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        local_url = (item.findtext("link") or "").strip()
+        guid = (item.findtext("guid") or local_url).strip()
+        rss_date = (item.findtext("pubDate") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        slug = item_slug_from_local_url(local_url)
+        if not local_url or not slug:
+            continue
+        items.append(
+            {
+                "title": title,
+                "local_url": local_url,
+                "guid": guid,
+                "rss_date": rss_date,
+                "description": description,
+                "slug": slug,
+            }
+        )
+    return items
+
+
 def restore_live_feed(public_base: str, site_dir: Path) -> bool:
     feed_url = f"{public_base.rstrip('/')}/{FEED_NAME}.xml"
     try:
@@ -221,13 +270,25 @@ def restore_live_feed(public_base: str, site_dir: Path) -> bool:
                 item_bytes = fetch_bytes(link, timeout=30)
             except Exception:
                 continue
-            rel = urlparse(link).path.lstrip("/")
+            rel = local_site_rel_from_url(public_base, link)
             out_dir = site_dir / rel
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "index.html").write_bytes(item_bytes)
     except Exception:
         pass
     return True
+
+
+def load_existing_items(site_dir: Path, public_base: str) -> list[dict]:
+    xml_path = site_dir / f"{FEED_NAME}.xml"
+    if not xml_path.exists():
+        restore_live_feed(public_base, site_dir)
+    if not xml_path.exists():
+        return []
+    try:
+        return parse_existing_items(xml_path)
+    except Exception:
+        return []
 
 
 def fetch_post_candidates() -> list[dict]:
@@ -288,8 +349,6 @@ def parse_article(candidate: dict) -> dict | None:
         if category != "Market Insights":
             return None
     else:
-        # 新文章有时会被 Jina 直接抽成正文片段，没有 breadcrumb。
-        # 这时只能在保证是 /news-and-insights/ 正文且内容足够长的前提下做兜底收录。
         if "/news-and-insights/" not in url:
             return None
 
@@ -326,7 +385,7 @@ def build_xml(items: list[dict], public_base: str) -> bytes:
         SubElement(rss_item, "link").text = item["local_url"]
         guid = SubElement(rss_item, "guid")
         guid.set("isPermaLink", "true")
-        guid.text = item["local_url"]
+        guid.text = item.get("guid") or item["local_url"]
         SubElement(rss_item, "pubDate").text = item["rss_date"]
         SubElement(rss_item, "description").text = item["description"]
 
@@ -342,25 +401,32 @@ if __name__ == "__main__":
     public_base = sys.argv[2]
     site_dir.mkdir(parents=True, exist_ok=True)
 
+    existing_items = load_existing_items(site_dir, public_base)
+    existing_by_slug = {item["slug"]: item for item in existing_items if item.get("slug")}
+    seen_title_keys = {item["title"].strip().lower() for item in existing_items if item.get("title")}
+
     built_items = []
-    seen_titles = set()
+    new_slugs = set()
     candidates = fetch_post_candidates()[:MAX_CANDIDATES]
     for candidate in candidates:
+        source_slug = slugify(urlparse(candidate["url"]).path.rstrip("/").split("/")[-1])
+        if source_slug in existing_by_slug or source_slug in new_slugs:
+            continue
+
         article = parse_article(candidate)
         if not article:
             continue
         title_key = article["title"].strip().lower()
-        if title_key in seen_titles:
+        if title_key in seen_title_keys:
             continue
-        seen_titles.add(title_key)
+        seen_title_keys.add(title_key)
 
-        slug = slugify(urlparse(article["source_url"]).path.rstrip("/").split("/")[-1])
-        local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{slug}/"
+        local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{source_slug}/"
         description = article["body_text"][:320].strip()
         if len(article["body_text"]) > 320:
             description += "..."
 
-        item_dir = site_dir / "item" / FEED_NAME / slug
+        item_dir = site_dir / "item" / FEED_NAME / source_slug
         item_dir.mkdir(parents=True, exist_ok=True)
         body_html = markdown_to_html(article["body_markdown"])
         (item_dir / "index.html").write_text(
@@ -368,19 +434,40 @@ if __name__ == "__main__":
             encoding="utf-8",
         )
 
+        article["slug"] = source_slug
         article["local_url"] = local_url
+        article["guid"] = local_url
         article["description"] = description
         built_items.append(article)
+        new_slugs.add(source_slug)
         if len(built_items) >= MAX_ITEMS:
             break
 
-    if len(built_items) < MIN_ITEMS and restore_live_feed(public_base, site_dir):
+    if not built_items and existing_items:
+        print(f"no new {FEED_NAME} items; kept existing {len(existing_items)} items")
+        sys.exit(0)
+
+    merged_items = []
+    seen_output_slugs = set()
+    for item in built_items + existing_items:
+        slug = item.get("slug") or item_slug_from_local_url(item.get("local_url", ""))
+        if not slug or slug in seen_output_slugs:
+            continue
+        seen_output_slugs.add(slug)
+        merged_items.append(item)
+        if len(merged_items) >= MAX_ITEMS:
+            break
+
+    if len(merged_items) < MIN_ITEMS and not existing_items and restore_live_feed(public_base, site_dir):
         print(f"restored live {FEED_NAME}: freshly built items={len(built_items)}")
         sys.exit(0)
 
-    if not built_items:
+    if not merged_items:
         raise SystemExit("No Citadel Market Insights items could be built")
 
-    xml = build_xml(built_items, public_base)
+    xml = build_xml(merged_items, public_base)
     (site_dir / f"{FEED_NAME}.xml").write_bytes(xml)
-    print(f"built {FEED_NAME} with {len(built_items)} items from {len(candidates)} candidates")
+    print(
+        f"built {FEED_NAME} incrementally: new_items={len(built_items)}, total_items={len(merged_items)}, "
+        f"candidates_scanned={len(candidates)}"
+    )
