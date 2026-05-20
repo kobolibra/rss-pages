@@ -40,11 +40,12 @@ CATEGORY_RE = re.compile(
 )
 DATE_LINE_RE = re.compile(r"^[A-Z][a-z]+\s+\d{1,2},\s+\d{4}\s*$", re.M)
 RSS_DATE_LINE_RE = re.compile(r"^[A-Z][a-z]{2},\s+\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4}$")
-CATEGORY_SECTION_RE = re.compile(r"## Market Insights\s*(.*?)\s*## Policy Positions", re.S)
+CATEGORY_HEADING_RE = re.compile(r"^# Market Insights\s*$", re.M)
 CATEGORY_CARD_RE = re.compile(
-    r"\[\]\((https://www\.citadelsecurities\.com/news-and-insights/[^)]+/)\)\s*\n\n"
-    r"!\[Image[^\n]*\n\n([^\n]+)\n\n"
-    r"Series:\[([^\]]+)\]\((https://www\.citadelsecurities\.com/news-and-insights/series/[^)]+)\)",
+    r"\[\]\((https?://www\.citadelsecurities\.com/news-and-insights/[^)]+/)\)\s*\n\n"
+    r"!\[[^\]]*\]\([^\)]+\)\s*\n\n"
+    r"##\s+([^\n]+)\s*\n\n"
+    r"Series:\s*\[([^\]]+)\]\((https?://www\.citadelsecurities\.com/news-and-insights/series/[^)]+)\)",
     re.S,
 )
 
@@ -363,13 +364,13 @@ def fetch_category_page_candidates() -> list[dict]:
         except Exception as e:
             last_error = e
             continue
-        if looks_blocked(text) or "## Market Insights" not in text:
+        if looks_blocked(text):
             continue
 
-        sm = CATEGORY_SECTION_RE.search(text)
-        if not sm:
+        hm = CATEGORY_HEADING_RE.search(text)
+        if not hm:
             continue
-        section = sm.group(1)
+        section = text[hm.end():]
 
         items: list[dict] = []
         seen_urls = set()
