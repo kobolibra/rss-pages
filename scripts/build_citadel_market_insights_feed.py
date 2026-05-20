@@ -16,9 +16,10 @@ FEED_NAME = "citadel_market_insights"
 FEED_TITLE = "Citadel Securities Market Insights"
 FEED_DESC = (
     "Citadel Securities Market Insights rebuilt to local full-text item pages "
-    "from sitemap discovery plus article extraction, so feed readers can open local pages."
+    "from the official Market Insights category feed plus article extraction, so feed readers can open local pages."
 )
 SITE_BASE = "https://www.citadelsecurities.com"
+CATEGORY_FEED_URL = f"{SITE_BASE}/news-and-insights/category/market-insights/feed/"
 POST_SITEMAP_URL = f"{SITE_BASE}/post-sitemap.xml"
 UA = "Mozilla/5.0 (compatible; GitHubActions-RSS-Mirror/1.0)"
 MAX_ITEMS = 20
@@ -34,6 +35,7 @@ CATEGORY_RE = re.compile(
     re.S,
 )
 DATE_LINE_RE = re.compile(r"^[A-Z][a-z]+\s+\d{1,2},\s+\d{4}\s*$", re.M)
+RSS_DATE_LINE_RE = re.compile(r"^[A-Z][a-z]{2},\s+\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4}$")
 
 
 def fetch_text(url: str, timeout: int = 60) -> str:
@@ -56,8 +58,8 @@ def slugify(value: str) -> str:
 def jina_proxy_urls(url: str) -> list[str]:
     stripped = re.sub(r"^https?://", "", url)
     return [
-        f"https://r.jina.ai/http://{stripped}",
         f"https://r.jina.ai/{url}",
+        f"https://r.jina.ai/http://{stripped}",
     ]
 
 
@@ -67,13 +69,18 @@ def looks_blocked(text: str) -> bool:
 
 
 def parse_iso_to_rss(value: str | None) -> str:
-    if value:
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return format_datetime(dt.astimezone(timezone.utc), usegmt=True)
-        except Exception:
-            pass
+    dt = parse_sort_datetime(value)
+    if dt != datetime.min.replace(tzinfo=timezone.utc):
+        return format_datetime(dt.astimezone(timezone.utc), usegmt=True)
     return format_datetime(datetime.now(timezone.utc), usegmt=True)
+
+
+def normalize_published_datetime(value: str | None) -> tuple[str | None, str]:
+    dt = parse_sort_datetime(value)
+    if dt == datetime.min.replace(tzinfo=timezone.utc):
+        return None, format_datetime(datetime.now(timezone.utc), usegmt=True)
+    dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(), format_datetime(dt, usegmt=True)
 
 
 def parse_sort_datetime(value: str | None) -> datetime:
@@ -308,17 +315,49 @@ def load_existing_items(site_dir: Path, public_base: str) -> list[dict]:
 
 
 def fetch_post_candidates() -> list[dict]:
-    xml_text = fetch_text(POST_SITEMAP_URL, timeout=30)
-    root = ET.fromstring(xml_text)
-    ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
-    items = []
-    for node in root.findall(f"{ns}url"):
-        loc = (node.findtext(f"{ns}loc") or "").strip()
-        lastmod = (node.findtext(f"{ns}lastmod") or "").strip()
-        if "/news-and-insights/" not in loc:
+    feed_source = None
+    for feed_url in jina_proxy_urls(CATEGORY_FEED_URL):
+        try:
+            text = fetch_text(feed_url, timeout=30)
+        except Exception:
             continue
-        items.append({"url": loc, "lastmod": lastmod})
-    return sorted(items, key=lambda item: parse_sort_datetime(item.get("lastmod")), reverse=True)
+        if looks_blocked(text):
+            continue
+        if "Markdown Content:" not in text:
+            continue
+        feed_source = text.split("Markdown Content:", 1)[1].strip()
+        break
+
+    if not feed_source:
+        raise RuntimeError("Could not fetch official Citadel Market Insights category feed")
+
+    lines = [line.strip() for line in feed_source.splitlines()]
+    items: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^### \[(.*?)\]\((https://www\.citadelsecurities\.com/news-and-insights/[^\)]+)\)$", line)
+        if not m:
+            i += 1
+            continue
+
+        title = m.group(1).strip()
+        url = m.group(2).strip()
+        rss_date = ""
+        j = i + 1
+        while j < len(lines):
+            probe = lines[j]
+            if probe.startswith("### "):
+                break
+            if RSS_DATE_LINE_RE.match(probe):
+                rss_date = probe
+                break
+            j += 1
+
+        items.append({"title": title, "url": url, "rss_date": rss_date})
+        i = j if j > i else i + 1
+
+    return sorted(items, key=lambda item: parse_sort_datetime(item.get("rss_date")), reverse=True)
 
 
 def fetch_article_source(url: str) -> str | None:
@@ -345,28 +384,23 @@ def parse_article(candidate: dict) -> dict | None:
     m = re.search(r"^Title:\s*(.+)$", source, flags=re.M)
     if m:
         meta_title = m.group(1).strip()
-    published_iso = None
+
+    published_value = None
     m = re.search(r"^Published Time:\s*(.+)$", source, flags=re.M)
     if m:
-        published_iso = m.group(1).strip()
-    if not published_iso:
-        published_iso = candidate.get("lastmod") or None
+        published_value = m.group(1).strip()
+    if not published_value:
+        published_value = candidate.get("rss_date") or candidate.get("lastmod") or None
+    published_iso, rss_date = normalize_published_datetime(published_value)
 
     body = source.split("Markdown Content:", 1)[1].strip()
 
-    category = None
-    title = meta_title or slugify(urlparse(url).path.rstrip("/").split("/")[-1]).replace("-", " ").title()
+    title = candidate.get("title") or meta_title or slugify(urlparse(url).path.rstrip("/").split("/")[-1]).replace("-", " ").title()
 
     cm = CATEGORY_RE.search(body)
     if cm:
-        category = cm.group(1).strip()
         title = cm.group(2).strip() or title
         body = body[cm.end():].strip()
-        if category != "Market Insights":
-            return None
-    else:
-        if "/news-and-insights/" not in url:
-            return None
 
     body = cleanup_article_markdown(body, title)
     if not body:
@@ -380,7 +414,7 @@ def parse_article(candidate: dict) -> dict | None:
         "title": title,
         "source_url": url,
         "published_iso": published_iso,
-        "rss_date": parse_iso_to_rss(published_iso),
+        "rss_date": rss_date,
         "body_markdown": body,
         "body_text": plain,
     }
@@ -424,6 +458,7 @@ if __name__ == "__main__":
     parsed_candidates = []
     seen_candidate_slugs = set()
     seen_candidate_titles = set()
+    preserved_items = 0
     for candidate in candidates:
         source_slug = slugify(urlparse(candidate["url"]).path.rstrip("/").split("/")[-1])
         if source_slug in seen_candidate_slugs:
@@ -431,37 +466,43 @@ if __name__ == "__main__":
 
         article = parse_article(candidate)
         if not article:
-            continue
-        title_key = article["title"].strip().lower()
-        if title_key in seen_candidate_titles:
-            continue
+            existing_item = existing_by_slug.get(source_slug)
+            if not existing_item:
+                continue
+            article = existing_item.copy()
+            article["title"] = candidate.get("title") or article.get("title") or source_slug.replace("-", " ").title()
+            article["sort_dt"] = parse_sort_datetime(candidate.get("rss_date") or article.get("rss_date"))
+            article["rss_date"] = parse_iso_to_rss(candidate.get("rss_date") or article.get("rss_date"))
+            article["slug"] = source_slug
+            article["preserved_existing"] = True
+            preserved_items += 1
+        else:
+            title_key = article["title"].strip().lower()
+            if title_key in seen_candidate_titles:
+                continue
+            article["slug"] = source_slug
+            article["sort_dt"] = parse_sort_datetime(article.get("published_iso") or candidate.get("rss_date") or article.get("rss_date"))
+            article["preserved_existing"] = False
 
         seen_candidate_slugs.add(source_slug)
-        seen_candidate_titles.add(title_key)
-        article["slug"] = source_slug
-        article["sort_dt"] = parse_sort_datetime(article.get("published_iso") or article.get("rss_date"))
+        seen_candidate_titles.add(article["title"].strip().lower())
         parsed_candidates.append(article)
 
     parsed_candidates.sort(key=lambda item: item["sort_dt"], reverse=True)
     selected_items = parsed_candidates[:MAX_ITEMS]
 
-    if len(selected_items) < MIN_ITEMS and existing_items:
+    if len(selected_items) < MIN_ITEMS:
         print(
-            f"insufficient fresh {FEED_NAME} items after sorting by published date; kept existing {len(existing_items)} items"
+            f"warning: only {len(selected_items)} verified {FEED_NAME} items after strict category filtering; "
+            "rebuilding without backfilling old items"
         )
-        sys.exit(0)
-
-    if not selected_items and not existing_items and restore_live_feed(public_base, site_dir):
-        print(f"restored live {FEED_NAME}: no items could be parsed")
-        sys.exit(0)
-
-    if not selected_items:
-        raise SystemExit("No Citadel Market Insights items could be built")
 
     selected_slugs = {item["slug"] for item in selected_items}
     new_items = 0
     for article in selected_items:
         source_slug = article["slug"]
+        if article.get("preserved_existing"):
+            continue
         local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{source_slug}/"
         description = article["body_text"][:320].strip()
         if len(article["body_text"]) > 320:
