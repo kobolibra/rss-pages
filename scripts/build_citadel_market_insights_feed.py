@@ -458,6 +458,7 @@ if __name__ == "__main__":
     parsed_candidates = []
     seen_candidate_slugs = set()
     seen_candidate_titles = set()
+    preserved_items = 0
     for candidate in candidates:
         source_slug = slugify(urlparse(candidate["url"]).path.rstrip("/").split("/")[-1])
         if source_slug in seen_candidate_slugs:
@@ -465,15 +466,26 @@ if __name__ == "__main__":
 
         article = parse_article(candidate)
         if not article:
-            continue
-        title_key = article["title"].strip().lower()
-        if title_key in seen_candidate_titles:
-            continue
+            existing_item = existing_by_slug.get(source_slug)
+            if not existing_item:
+                continue
+            article = existing_item.copy()
+            article["title"] = candidate.get("title") or article.get("title") or source_slug.replace("-", " ").title()
+            article["sort_dt"] = parse_sort_datetime(candidate.get("rss_date") or article.get("rss_date"))
+            article["rss_date"] = parse_iso_to_rss(candidate.get("rss_date") or article.get("rss_date"))
+            article["slug"] = source_slug
+            article["preserved_existing"] = True
+            preserved_items += 1
+        else:
+            title_key = article["title"].strip().lower()
+            if title_key in seen_candidate_titles:
+                continue
+            article["slug"] = source_slug
+            article["sort_dt"] = parse_sort_datetime(article.get("published_iso") or candidate.get("rss_date") or article.get("rss_date"))
+            article["preserved_existing"] = False
 
         seen_candidate_slugs.add(source_slug)
-        seen_candidate_titles.add(title_key)
-        article["slug"] = source_slug
-        article["sort_dt"] = parse_sort_datetime(article.get("published_iso") or article.get("rss_date"))
+        seen_candidate_titles.add(article["title"].strip().lower())
         parsed_candidates.append(article)
 
     parsed_candidates.sort(key=lambda item: item["sort_dt"], reverse=True)
@@ -489,6 +501,8 @@ if __name__ == "__main__":
     new_items = 0
     for article in selected_items:
         source_slug = article["slug"]
+        if article.get("preserved_existing"):
+            continue
         local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{source_slug}/"
         description = article["body_text"][:320].strip()
         if len(article["body_text"]) > 320:
