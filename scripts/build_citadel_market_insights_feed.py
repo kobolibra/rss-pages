@@ -20,6 +20,10 @@ FEED_DESC = (
 )
 SITE_BASE = "https://www.citadelsecurities.com"
 CATEGORY_FEED_URL = f"{SITE_BASE}/news-and-insights/category/market-insights/feed/"
+CATEGORY_PAGE_FALLBACKS = [
+    "https://r.jina.ai/http://www.citadelsecurities.com/zh-hans/news-and-insights/category/%E5%B8%82%E5%9C%BA%E8%A7%82%E7%82%B9/",
+    "https://r.jina.ai/http://www.citadelsecurities.com/news-and-insights/category/market-insights/",
+]
 POST_SITEMAP_URL = f"{SITE_BASE}/post-sitemap.xml"
 UA = "Mozilla/5.0 (compatible; GitHubActions-RSS-Mirror/1.0)"
 MAX_ITEMS = 20
@@ -36,6 +40,13 @@ CATEGORY_RE = re.compile(
 )
 DATE_LINE_RE = re.compile(r"^[A-Z][a-z]+\s+\d{1,2},\s+\d{4}\s*$", re.M)
 RSS_DATE_LINE_RE = re.compile(r"^[A-Z][a-z]{2},\s+\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4}$")
+CATEGORY_SECTION_RE = re.compile(r"## Market Insights\s*(.*?)\s*## Policy Positions", re.S)
+CATEGORY_CARD_RE = re.compile(
+    r"\[\]\((https://www\.citadelsecurities\.com/news-and-insights/[^)]+/)\)\s*\n\n"
+    r"!\[Image[^\n]*\n\n([^\n]+)\n\n"
+    r"Series:\[([^\]]+)\]\((https://www\.citadelsecurities\.com/news-and-insights/series/[^)]+)\)",
+    re.S,
+)
 
 
 def fetch_text(url: str, timeout: int = 60) -> str:
@@ -317,35 +328,70 @@ def load_existing_items(site_dir: Path, public_base: str) -> list[dict]:
 def fetch_post_candidates() -> list[dict]:
     try:
         xml_bytes = fetch_bytes(CATEGORY_FEED_URL, timeout=30)
-    except Exception as e:
-        raise RuntimeError(f"Could not fetch official Citadel Market Insights category feed: {e}") from e
-
-    try:
         root = ET.fromstring(xml_bytes)
-    except Exception as e:
-        raise RuntimeError("Official Citadel Market Insights category feed did not return valid XML") from e
+        channel = root.find("channel")
+        if channel is None:
+            raise RuntimeError("Official Citadel Market Insights category feed XML missing channel")
 
-    channel = root.find("channel")
-    if channel is None:
-        raise RuntimeError("Official Citadel Market Insights category feed XML missing channel")
+        items: list[dict] = []
+        for node in channel.findall("item"):
+            title = (node.findtext("title") or "").strip()
+            url = (node.findtext("link") or "").strip()
+            rss_date = (node.findtext("pubDate") or "").strip()
+            if not url.startswith(f"{SITE_BASE}/news-and-insights/"):
+                continue
+            if not title or not url:
+                continue
+            items.append({"title": title, "url": url, "rss_date": rss_date})
 
-    items: list[dict] = []
-    for node in channel.findall("item"):
-        title = (node.findtext("title") or "").strip()
-        url = (node.findtext("link") or "").strip()
-        rss_date = (node.findtext("pubDate") or "").strip()
-        if not url.startswith(f"{SITE_BASE}/news-and-insights/"):
-            continue
-        if not title or not url:
-            continue
-        items.append({"title": title, "url": url, "rss_date": rss_date})
+        if items:
+            return sorted(items, key=lambda item: parse_sort_datetime(item.get("rss_date")), reverse=True)
+    except Exception:
+        pass
 
+    items = fetch_category_page_candidates()
     if not items:
-        raise RuntimeError("Official Citadel Market Insights category feed returned zero usable items")
+        raise RuntimeError("Citadel Market Insights source returned zero usable items")
+    return items
 
-    return sorted(items, key=lambda item: parse_sort_datetime(item.get("rss_date")), reverse=True)
 
+def fetch_category_page_candidates() -> list[dict]:
+    last_error = None
+    for url in CATEGORY_PAGE_FALLBACKS:
+        try:
+            text = fetch_text(url, timeout=30)
+        except Exception as e:
+            last_error = e
+            continue
+        if looks_blocked(text) or "## Market Insights" not in text:
+            continue
 
+        sm = CATEGORY_SECTION_RE.search(text)
+        if not sm:
+            continue
+        section = sm.group(1)
+
+        items: list[dict] = []
+        seen_urls = set()
+        for m in CATEGORY_CARD_RE.finditer(section):
+            article_url = m.group(1).strip()
+            title = html.unescape(m.group(2).strip())
+            series = html.unescape(m.group(3).strip())
+            if article_url in seen_urls:
+                continue
+            seen_urls.add(article_url)
+            items.append({
+                "title": title,
+                "url": article_url,
+                "series": series,
+                "rss_date": None,
+            })
+
+        if items:
+            return items
+
+    detail = f": {last_error}" if last_error else ""
+    raise RuntimeError(f"Could not fetch usable Citadel Market Insights category page fallback{detail}")
 def fetch_article_source(url: str) -> str | None:
     for proxy_url in jina_proxy_urls(url):
         try:
