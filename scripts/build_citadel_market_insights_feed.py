@@ -3,7 +3,7 @@ import html
 import re
 import sys
 from datetime import datetime, timezone
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from xml.dom import minidom
@@ -74,6 +74,22 @@ def parse_iso_to_rss(value: str | None) -> str:
         except Exception:
             pass
     return format_datetime(datetime.now(timezone.utc), usegmt=True)
+
+
+def parse_sort_datetime(value: str | None) -> datetime:
+    if value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            pass
+        try:
+            dt = parsedate_to_datetime(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def strip_markdown_links(text: str) -> str:
@@ -302,7 +318,7 @@ def fetch_post_candidates() -> list[dict]:
         if "/news-and-insights/" not in loc:
             continue
         items.append({"url": loc, "lastmod": lastmod})
-    return list(reversed(items))
+    return sorted(items, key=lambda item: parse_sort_datetime(item.get("lastmod")), reverse=True)
 
 
 def fetch_article_source(url: str) -> str | None:
@@ -403,24 +419,49 @@ if __name__ == "__main__":
 
     existing_items = load_existing_items(site_dir, public_base)
     existing_by_slug = {item["slug"]: item for item in existing_items if item.get("slug")}
-    seen_title_keys = {item["title"].strip().lower() for item in existing_items if item.get("title")}
 
-    built_items = []
-    new_slugs = set()
     candidates = fetch_post_candidates()[:MAX_CANDIDATES]
+    parsed_candidates = []
+    seen_candidate_slugs = set()
+    seen_candidate_titles = set()
     for candidate in candidates:
         source_slug = slugify(urlparse(candidate["url"]).path.rstrip("/").split("/")[-1])
-        if source_slug in existing_by_slug or source_slug in new_slugs:
+        if source_slug in seen_candidate_slugs:
             continue
 
         article = parse_article(candidate)
         if not article:
             continue
         title_key = article["title"].strip().lower()
-        if title_key in seen_title_keys:
+        if title_key in seen_candidate_titles:
             continue
-        seen_title_keys.add(title_key)
 
+        seen_candidate_slugs.add(source_slug)
+        seen_candidate_titles.add(title_key)
+        article["slug"] = source_slug
+        article["sort_dt"] = parse_sort_datetime(article.get("published_iso") or article.get("rss_date"))
+        parsed_candidates.append(article)
+
+    parsed_candidates.sort(key=lambda item: item["sort_dt"], reverse=True)
+    selected_items = parsed_candidates[:MAX_ITEMS]
+
+    if len(selected_items) < MIN_ITEMS and existing_items:
+        print(
+            f"insufficient fresh {FEED_NAME} items after sorting by published date; kept existing {len(existing_items)} items"
+        )
+        sys.exit(0)
+
+    if not selected_items and not existing_items and restore_live_feed(public_base, site_dir):
+        print(f"restored live {FEED_NAME}: no items could be parsed")
+        sys.exit(0)
+
+    if not selected_items:
+        raise SystemExit("No Citadel Market Insights items could be built")
+
+    selected_slugs = {item["slug"] for item in selected_items}
+    new_items = 0
+    for article in selected_items:
+        source_slug = article["slug"]
         local_url = f"{public_base.rstrip('/')}/item/{FEED_NAME}/{source_slug}/"
         description = article["body_text"][:320].strip()
         if len(article["body_text"]) > 320:
@@ -434,40 +475,16 @@ if __name__ == "__main__":
             encoding="utf-8",
         )
 
-        article["slug"] = source_slug
         article["local_url"] = local_url
         article["guid"] = local_url
         article["description"] = description
-        built_items.append(article)
-        new_slugs.add(source_slug)
-        if len(built_items) >= MAX_ITEMS:
-            break
+        if source_slug not in existing_by_slug:
+            new_items += 1
 
-    if not built_items and existing_items:
-        print(f"no new {FEED_NAME} items; kept existing {len(existing_items)} items")
-        sys.exit(0)
-
-    merged_items = []
-    seen_output_slugs = set()
-    for item in built_items + existing_items:
-        slug = item.get("slug") or item_slug_from_local_url(item.get("local_url", ""))
-        if not slug or slug in seen_output_slugs:
-            continue
-        seen_output_slugs.add(slug)
-        merged_items.append(item)
-        if len(merged_items) >= MAX_ITEMS:
-            break
-
-    if len(merged_items) < MIN_ITEMS and not existing_items and restore_live_feed(public_base, site_dir):
-        print(f"restored live {FEED_NAME}: freshly built items={len(built_items)}")
-        sys.exit(0)
-
-    if not merged_items:
-        raise SystemExit("No Citadel Market Insights items could be built")
-
-    xml = build_xml(merged_items, public_base)
+    xml = build_xml(selected_items, public_base)
     (site_dir / f"{FEED_NAME}.xml").write_bytes(xml)
+    removed_items = len([slug for slug in existing_by_slug if slug not in selected_slugs])
     print(
-        f"built {FEED_NAME} incrementally: new_items={len(built_items)}, total_items={len(merged_items)}, "
-        f"candidates_scanned={len(candidates)}"
+        f"rebuilt {FEED_NAME} by published date: selected_items={len(selected_items)}, new_items={new_items}, "
+        f"removed_items={removed_items}, candidates_scanned={len(candidates)}, parsed_candidates={len(parsed_candidates)}"
     )

@@ -733,6 +733,7 @@ def build_feed(site_dir: Path, public_base: str):
     pdf_count = 0
     total_count = 0
     new_count = 0
+    new_pdf_count = 0
     output_items: list[dict] = []
 
     for entry in parsed.entries[:MAX_ITEMS]:
@@ -829,8 +830,9 @@ def build_feed(site_dir: Path, public_base: str):
             final_guid = local_url
             is_permalink = True
             pdf_count += 1
-            new_count += 1
+            new_pdf_count += 1
 
+        new_count += 1
         output_items.append(
             {
                 "title": title,
@@ -857,7 +859,7 @@ def build_feed(site_dir: Path, public_base: str):
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     output_path.write_bytes(xml_bytes)
-    print(f"Saved {output_path} incrementally (items={total_count}, new_localized={new_count}, pdf_localized={pdf_count})")
+    print(f"Saved {output_path} incrementally (items={total_count}, new_items={new_count}, new_localized={new_pdf_count}, pdf_localized={pdf_count})")
 
 
 if __name__ == "__main__":
