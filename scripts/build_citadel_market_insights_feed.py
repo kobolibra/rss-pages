@@ -315,47 +315,33 @@ def load_existing_items(site_dir: Path, public_base: str) -> list[dict]:
 
 
 def fetch_post_candidates() -> list[dict]:
-    feed_source = None
-    for feed_url in jina_proxy_urls(CATEGORY_FEED_URL):
-        try:
-            text = fetch_text(feed_url, timeout=30)
-        except Exception:
-            continue
-        if looks_blocked(text):
-            continue
-        if "Markdown Content:" not in text:
-            continue
-        feed_source = text.split("Markdown Content:", 1)[1].strip()
-        break
+    try:
+        xml_bytes = fetch_bytes(CATEGORY_FEED_URL, timeout=30)
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch official Citadel Market Insights category feed: {e}") from e
 
-    if not feed_source:
-        raise RuntimeError("Could not fetch official Citadel Market Insights category feed")
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception as e:
+        raise RuntimeError("Official Citadel Market Insights category feed did not return valid XML") from e
 
-    lines = [line.strip() for line in feed_source.splitlines()]
+    channel = root.find("channel")
+    if channel is None:
+        raise RuntimeError("Official Citadel Market Insights category feed XML missing channel")
+
     items: list[dict] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m = re.match(r"^### \[(.*?)\]\((https://www\.citadelsecurities\.com/news-and-insights/[^\)]+)\)$", line)
-        if not m:
-            i += 1
+    for node in channel.findall("item"):
+        title = (node.findtext("title") or "").strip()
+        url = (node.findtext("link") or "").strip()
+        rss_date = (node.findtext("pubDate") or "").strip()
+        if not url.startswith(f"{SITE_BASE}/news-and-insights/"):
             continue
-
-        title = m.group(1).strip()
-        url = m.group(2).strip()
-        rss_date = ""
-        j = i + 1
-        while j < len(lines):
-            probe = lines[j]
-            if probe.startswith("### "):
-                break
-            if RSS_DATE_LINE_RE.match(probe):
-                rss_date = probe
-                break
-            j += 1
-
+        if not title or not url:
+            continue
         items.append({"title": title, "url": url, "rss_date": rss_date})
-        i = j if j > i else i + 1
+
+    if not items:
+        raise RuntimeError("Official Citadel Market Insights category feed returned zero usable items")
 
     return sorted(items, key=lambda item: parse_sort_datetime(item.get("rss_date")), reverse=True)
 
