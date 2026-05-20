@@ -29,6 +29,9 @@ UA = "Mozilla/5.0 (compatible; GitHubActions-RSS-Mirror/1.0)"
 MAX_ITEMS = 20
 MAX_CANDIDATES = 40
 MIN_ITEMS = 5
+EXCLUDED_SOURCE_SLUGS = {
+    "flow-fragility",
+}
 BLOCKED_MARKERS = (
     "Warning: Target URL returned error 403",
     "Performing security verification",
@@ -494,6 +497,8 @@ if __name__ == "__main__":
     preserved_items = 0
     for candidate in candidates:
         source_slug = slugify(urlparse(candidate["url"]).path.rstrip("/").split("/")[-1])
+        if source_slug in EXCLUDED_SOURCE_SLUGS:
+            continue
         if source_slug in seen_candidate_slugs:
             continue
 
