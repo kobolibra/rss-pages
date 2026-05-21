@@ -747,6 +747,12 @@ def build_feed(site_dir: Path, public_base: str):
         slug = entry_slug(title, link, guid) if is_pdf_url(link) else None
         if not existing_item and slug:
             existing_item = existing_slug_map.get(slug)
+        if existing_item and slug and is_pdf_url(link):
+            existing_link = (existing_item.get("link") or "").strip()
+            current_local_index = item_root / slug / "index.html"
+            if existing_link.startswith(f"{public_base}/item/{FEED_NAME}/") and not current_local_index.exists():
+                print(f"INFO: rebuilding missing local DB Research item page for {link} -> {current_local_index}")
+                existing_item = None
         if existing_item:
             output_items.append(
                 {
