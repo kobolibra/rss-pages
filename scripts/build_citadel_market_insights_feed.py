@@ -350,7 +350,14 @@ def fetch_post_candidates() -> list[dict]:
     except Exception:
         pass
 
-    items = fetch_category_page_candidates()
+    try:
+        items = fetch_category_page_candidates()
+        if items:
+            return items
+    except Exception:
+        pass
+
+    items = fetch_sitemap_candidates()
     if not items:
         raise RuntimeError("Citadel Market Insights source returned zero usable items")
     return items
@@ -393,6 +400,39 @@ def fetch_category_page_candidates() -> list[dict]:
 
     detail = f": {last_error}" if last_error else ""
     raise RuntimeError(f"Could not fetch usable Citadel Market Insights category page fallback{detail}")
+
+
+def fetch_sitemap_candidates() -> list[dict]:
+    xml_bytes = fetch_bytes(POST_SITEMAP_URL, timeout=30)
+    root = ET.fromstring(xml_bytes)
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+    items: list[dict] = []
+    seen_urls = set()
+    for node in root.findall("sm:url", ns) or root.findall("url"):
+        loc = (node.findtext("sm:loc", default="", namespaces=ns) or node.findtext("loc") or "").strip()
+        lastmod = (node.findtext("sm:lastmod", default="", namespaces=ns) or node.findtext("lastmod") or "").strip()
+        if not loc.startswith(f"{SITE_BASE}/news-and-insights/"):
+            continue
+        path = urlparse(loc).path.rstrip("/")
+        slug = path.split("/")[-1].strip()
+        if not slug or slug in {"news-and-insights", "category", "series", "tag"}:
+            continue
+        if loc in seen_urls:
+            continue
+        seen_urls.add(loc)
+        items.append(
+            {
+                "title": slug.replace("-", " ").title(),
+                "url": loc,
+                "lastmod": lastmod or None,
+                "rss_date": lastmod or None,
+            }
+        )
+
+    return sorted(items, key=lambda item: parse_sort_datetime(item.get("lastmod") or item.get("rss_date")), reverse=True)
+
+
 def fetch_article_source(url: str) -> str | None:
     for proxy_url in jina_proxy_urls(url):
         try:
