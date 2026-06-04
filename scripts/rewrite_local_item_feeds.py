@@ -26,6 +26,25 @@ def slugify_from_link_or_title(link: str, title: str) -> str:
     return slug or hashlib.md5((link + title).encode("utf-8")).hexdigest()[:12]
 
 
+def build_blackrock_slug(title: str, pub_date: str, fallback_link: str = "") -> str:
+    base = re.sub(r"[^a-zA-Z0-9]+", "-", title).strip("-").lower()
+    if not base:
+        base = hashlib.md5((fallback_link + title).encode("utf-8")).hexdigest()[:12]
+
+    date_slug = ""
+    if pub_date:
+        for fmt in ["%a, %d %b %Y %H:%M:%S GMT", "%Y-%m-%d", "%B %d, %Y", "%b %d, %Y"]:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(pub_date, fmt)
+                date_slug = dt.strftime("%Y-%m-%d")
+                break
+            except Exception:
+                continue
+
+    return f"{base}-{date_slug}" if date_slug else base
+
+
 def build_page(title: str, body_html: str, source_link: str) -> str:
     # 不在本地 item 页里放外站超链接，尽量避免阅读器继续回源抓正文
     source_html = (
@@ -149,7 +168,10 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         full_text = html_to_text(content_html)
         if feed_name != "blackrock_weekly_commentary" and len(full_text) > len(desc or ""):
             desc = full_text
-        slug = slugify_from_link_or_title(link or guid, title)
+        if feed_name == "blackrock_weekly_commentary":
+            slug = build_blackrock_slug(title, pub_date, link or guid)
+        else:
+            slug = slugify_from_link_or_title(link or guid, title)
         local_url = f"{public_base.rstrip('/')}/item/{feed_name}/{slug}/"
 
         out_dir = site_dir / "item" / feed_name / slug
