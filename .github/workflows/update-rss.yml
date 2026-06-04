@@ -99,10 +99,6 @@ jobs:
             python scripts/validate_feeds.py site
           fi
 
-      - name: Create BlackRock refresh alias
-        run: |
-          cp site/blackrock_weekly_commentary.xml site/blackrock_weekly_commentary_refresh.xml
-
       - name: Add index page
         run: |
           cat > site/index.html <<'EOF'
@@ -114,7 +110,6 @@ jobs:
               <li><a href="trivium_finance_regs.xml">Trivium Finance Regs</a></li>
               <li><a href="barclays_weekly_insights.xml">Barclays Weekly Insights</a></li>
               <li><a href="blackrock_weekly_commentary.xml">blackrock_weekly_commentary</a></li>
-              <li><a href="blackrock_weekly_commentary_refresh.xml">blackrock_weekly_commentary_refresh</a></li>
               <li><a href="carlyle_insights.xml">carlyle_insights</a></li>
               <li><a href="pitchbook_reports.xml">pitchbook_reports</a></li>
               <li><a href="yardeni_morning_briefing.xml">yardeni_morning_briefing</a></li>
