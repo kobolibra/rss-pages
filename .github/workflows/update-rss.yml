@@ -99,6 +99,14 @@ jobs:
             python scripts/validate_feeds.py site
           fi
 
+      - name: Build experimental dbresearch_lab feed (additive, non-fatal)
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          DBRESEARCH_LAB_MAX_ITEMS="${DBRESEARCH_LAB_MAX_ITEMS:-12}" \
+            python scripts/build_dbresearch_lab_feed.py site "$BASE_URL" \
+            || echo "[lab] dbresearch_lab build failed; deploying without it (production feeds unaffected)"
+
       - name: Add index page
         run: |
           cat > site/index.html <<'EOF'
@@ -117,6 +125,7 @@ jobs:
               <li><a href="gsam.xml">gsam</a></li>
               <li><a href="dws_cio.xml">dws_cio</a></li>
               <li><a href="dbresearch.xml">dbresearch</a></li>
+              <li><a href="dbresearch_lab.xml">dbresearch_lab (experimental)</a></li>
               <li><a href="citadel_market_insights.xml">citadel_market_insights</a></li>
             </ul>
           </body>
