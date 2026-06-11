@@ -1,93 +1,76 @@
-# DB Research PDF extraction — self-updating "lab" feed
+# DB Research lab feed (experimental)
 
-This is a **side-by-side copy** of the DB Research feed builder used to research
-better PDF body-text extraction that **preserves headings, tables and figures**
-and renders them as real web content instead of full-page raster images.
+`build_dbresearch_lab_feed.py` is a **separate, experimental** copy of the
+production DB Research builder. It is used to research a better
+"reproduce the PDF on the web" experience **without touching** the production
+`dbresearch` feed or its pages.
 
-It is published as its own self-updating feed, **alongside** (never replacing)
-the production `dbresearch` feed.
+- Source feed: same DB Research source as production.
+- Output feed: `site/dbresearch_lab.xml`
+- Item pages: `site/item/dbresearch_lab/<slug>/index.html` (+ `original.pdf`, `page-NNN.svg`)
+- Subscribe URL: `https://kobolibra.github.io/rss-pages/dbresearch_lab.xml`
 
-| | Production | Lab |
-|---|---|---|
-| Script | `scripts/build_dbresearch_feed.py` | `scripts/build_dbresearch_lab_feed.py` |
-| Feed file | `dbresearch.xml` | `dbresearch_lab.xml` |
-| Item pages | `item/dbresearch/...` | `item/dbresearch_lab/...` |
-| Pipeline | `.github/workflows/update-rss.yml` | same workflow, separate **additive, non-fatal** step |
+The production feed (`dbresearch.xml`, `item/dbresearch/...`) is never modified.
 
-## How it stays updated
+## What this experiment changes vs. the first lab version
 
-The lab feed is built by the **same** `update-rss.yml` workflow, on the same
-twice-daily schedule, and deployed to GitHub Pages together with every other
-feed. Subscribe to it at:
+### 1. Incremental (only process new items)
 
-```
-https://kobolibra.github.io/rss-pages/dbresearch_lab.xml
-```
+It mirrors the production incrementality model:
 
-The lab build is an **additive, non-fatal** step placed *after* feed validation:
-if it ever errors it is simply skipped, and the production `dbresearch` feed plus
-all other feeds deploy normally and are never modified. The existing
-`dbresearch` build line, feed file and `item/dbresearch/` pages are untouched.
+1. Restore the already-published `dbresearch_lab.xml` plus each item page and its
+   assets (including `original.pdf` and the page SVGs) from live GitHub Pages.
+2. Match incoming entries against the restored feed by GUID and by slug.
+3. **Skip** any item that is already localized at the current render version.
+4. Only **fetch and render entries that are new** (or that need a render upgrade).
+5. If nothing new was processed, the feed and pages are left untouched.
 
-## Why the old output was weak
+So each run does *not* re-download or re-render the whole feed; it only does work
+for newly added articles.
 
-The DB Research PDFs are **born-digital** (they have a real text layer), not
-scanned. The production builder:
+### 2. Faithful web reproduction (real text, not a screenshot)
 
-1. extracts a flat list of paragraphs with pypdf / PyMuPDF, then
-2. rasterizes **every page** to a big PNG (`render_pdf_pages`) and stacks them.
+Instead of embedding a flat full-page image, every PDF page is rendered to its
+own **SVG** with `page.get_svg_image(text_as_path=False)`. That means:
 
-So tables become prose, charts are lost from the text, and each item ships
-20-80 PNGs of 200-700 KB. "Format preserved" only in the sense of a photo of
-each page (not selectable, not responsive, huge).
+- The original **layout, charts, tables, colors and positioning are reproduced
+  exactly** (vector, sharp at any zoom / width).
+- The body **text stays real and selectable / searchable** — it is not flattened
+  into a picture.
+- Each page SVG is isolated in its own file and embedded responsively in the
+  item page; a collapsible "Plain text" section is included for search and
+  accessibility.
 
-## What the lab builder does instead
+For born-digital PDFs (which DB Research reports are) this yields real,
+selectable text. For truly scanned / image-only PDFs the page degrades to the
+embedded raster inside the SVG; adding an OCR text layer is the natural next
+research step.
 
-Primary strategy (CPU-only, CI-friendly — uses PyMuPDF, already a dependency):
+## Render version / upgrades
 
-1. **Reading-order structured parse** via `page.get_text("dict")`; heading
-   levels are inferred from font size relative to the page's median body size
-   (`<h2>/<h3>` vs `<p>`).
-2. **Tables** are detected with `page.find_tables()` and emitted as real
-   `<table>` HTML; their bounding boxes suppress duplicate prose.
-3. **Figures/charts** are located from embedded raster images
-   (`page.get_images` + `get_image_rects`) and clustered vector drawings
-   (`page.cluster_drawings()`), then **cropped** to individual PNGs and embedded
-   inline `<figure>` at their true position — much smaller than full-page rasters
-   and placed in context.
-4. **Image-only / scanned pages** (almost no extractable text) fall back to a
-   single full-page raster for that page only, with an optional OCR hook.
+`RENDER_VERSION` marks the rendering scheme. When it is bumped, already-published
+pages are regenerated from their **cached** `original.pdf` (no re-download) the
+next time they appear in the source feed, up to `DBRESEARCH_LAB_MAX_ITEMS` per
+run. Set `DBRESEARCH_LAB_FORCE_REBUILD=1` to rebuild everything in one run.
 
-The result is a semantic, responsive HTML article: selectable text, real tables,
-in-context cropped charts, with the original PDF still linked/downloadable.
-
-## Run it locally
+## Run locally
 
 ```bash
-pip install requests feedparser playwright pypdf pymupdf
-python -m playwright install chromium   # only needed for the DB viewer fallback
-
 python scripts/build_dbresearch_lab_feed.py site "https://kobolibra.github.io/rss-pages"
-# Output: site/dbresearch_lab.xml + site/item/dbresearch_lab/<slug>/index.html
 ```
 
-Env knobs (all optional): `DBRESEARCH_LAB_MAX_ITEMS`, `DBRESEARCH_LAB_FEED_NAME`,
-`DBRESEARCH_LAB_FIG_SCALE`, `DBRESEARCH_LAB_MIN_PAGE_TEXT`,
-`DBRESEARCH_LAB_RASTER_FALLBACK` (`1`/`0`). In CI the workflow sets
-`DBRESEARCH_LAB_MAX_ITEMS` to a modest number to keep runtime reasonable.
+## Key environment variables
 
-## Higher-fidelity options (heavier, not enabled here)
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DBRESEARCH_LAB_MAX_ITEMS` | `40` | Max source entries considered per run |
+| `DBRESEARCH_LAB_MAX_PAGES` | `60` | Max PDF pages rendered per item |
+| `DBRESEARCH_LAB_FORCE_REBUILD` | `0` | `1` rebuilds all items (ignores cache/skip) |
+| `DBRESEARCH_LAB_BROWSER_FALLBACK` | `1` | `0` disables the Playwright PDF capture fallback |
 
-If you later want the best possible fidelity (esp. complex tables / equations /
-truly scanned PDFs), route the PDF through a document-AI model and keep this
-structured HTML as the fast fallback:
+## CI
 
-- **Marker** (`marker-pdf`): PDF -> Markdown/HTML/JSON, extracts images, tables,
-  equations; `--force_ocr` for scanned, `--use_llm` to boost accuracy.
-- **MinerU**: multi-model fusion, complex tables as HTML, formulas as LaTeX,
-  auto-detects scanned docs (84-language OCR). GPU recommended.
-- **Mistral OCR API**: hosted SOTA OCR -> Markdown, auto-cuts images. No GPU.
-
-These need large models / a GPU / an API key, so they are unsuitable for the
-twice-daily free GitHub Actions runner without extra infrastructure; that is why
-the default lab path is the lightweight PyMuPDF parser above.
+The `update-rss.yml` workflow runs this builder as an **additive, non-fatal**
+step after the production feeds are built and validated (`... || echo`), so a lab
+failure can never break production. No extra dependencies are required — it uses
+the already-installed PyMuPDF.
