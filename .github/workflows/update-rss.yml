@@ -44,7 +44,8 @@ jobs:
       - name: Build WebToRSS feeds (per-feed fallback to live copy)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
           python scripts/build_with_live_fallback.py "$BASE_URL" site blackrock_weekly_commentary 1 \
             python web_to_rss.py -c feeds/blackrock_weekly_commentary.yaml -f -o blackrock_weekly_commentary.xml
@@ -64,7 +65,8 @@ jobs:
       - name: Enrich feeds with content while keeping source links
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
 
           if [ ! -f site/trivium_finance_regs.xml ]; then
             echo "trivium_finance_regs.xml missing before rewrite; restoring from live Pages"
@@ -86,13 +88,15 @@ jobs:
       - name: Preserve unchanged feeds
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
           python scripts/preserve_unchanged_live_feeds.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights"
 
       - name: Validate generated feeds (restore last known-good on regression)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
           if ! python scripts/validate_feeds.py site; then
             echo "Validation regression detected; restoring last known-good feeds from live Pages"
             python scripts/restore_live_pages_feed.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights,trivium_finance_regs"
@@ -102,7 +106,8 @@ jobs:
       - name: Build experimental dbresearch_lab feed (additive, non-fatal)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
           DBRESEARCH_LAB_MAX_ITEMS="${DBRESEARCH_LAB_MAX_ITEMS:-12}" \
             python scripts/build_dbresearch_lab_feed.py site "$BASE_URL" \
             || echo "[lab] dbresearch_lab build failed; deploying without it (production feeds unaffected)"
