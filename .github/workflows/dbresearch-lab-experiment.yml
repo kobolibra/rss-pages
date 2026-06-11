@@ -1,0 +1,58 @@
+name: DB Research Lab (experiment)
+
+# Manual-only. Lives on the dbresearch-lab-experiment branch and is NOT on main,
+# so it never runs on a schedule and never affects the production dbresearch feed
+# or the live GitHub Pages site. It only builds the experimental lab output and
+# uploads it as a downloadable artifact (no commit, no Pages deploy).
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_items:
+        description: "How many feed items to build (keep small for a quick demo)"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  build-lab:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          ref: dbresearch-lab-experiment
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyyaml feedparser beautifulsoup4 playwright pypdf pymupdf
+          python -m playwright install --with-deps chromium
+
+      - name: Build experimental lab feed
+        env:
+          DBRESEARCH_LAB_MAX_ITEMS: $ github.event.inputs.max_items 
+        run: |
+          python scripts/build_dbresearch_lab_feed.py site "https://kobolibra.github.io/rss-pages"
+
+      - name: Show what was produced
+        if: always()
+        run: |
+          echo "== feed ==" && ls -la site/dbresearch_lab.xml || true
+          echo "== items ==" && find site/item/dbresearch_lab -maxdepth 2 -type d || true
+
+      - name: Upload lab output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbresearch-lab-output
+          path: |
+            site/dbresearch_lab.xml
+            site/item/dbresearch_lab/**
+          if-no-files-found: warn
