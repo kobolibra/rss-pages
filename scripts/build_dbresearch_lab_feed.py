@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""EXPERIMENTAL DB Research builder: PDF -> structured, figure-preserving HTML.
+"""EXPERIMENTAL DB Research builder: PDF -> faithful, web-reproduced HTML pages.
 
-This is a SEPARATE copy of build_dbresearch_feed.py for researching better PDF
-body-text extraction. It writes a different feed (dbresearch_lab.xml) and a
-different item directory (item/dbresearch_lab/...), so the production
-`dbresearch` feed and pages are never touched.
+This is a SEPARATE copy of build_dbresearch_feed.py used to research a better
+"reproduce the PDF on the web" experience. It writes its own feed
+(dbresearch_lab.xml) and its own item directory (item/dbresearch_lab/...), so
+the production `dbresearch` feed and pages are never touched.
 
-Strategy (CPU-only / CI-friendly), per page:
-  1. find_tables()        -> real <table> HTML, bbox suppresses duplicate prose
-  2. images + drawings    -> cropped <figure> PNGs embedded in context
-  3. get_text("dict")     -> reading-order text, heading levels from font size
-  4. near-empty page      -> single full-page raster fallback (optional OCR hook)
+Two properties this builder guarantees:
 
-See scripts/README_dbresearch_lab.md for details and heavier alternatives.
+1. INCREMENTAL (same model as production): it restores the already-published
+   feed + item pages from live Pages, then only fetches and renders entries it
+   has not processed yet. Already-localized items are reused as-is. If nothing
+   is new, the feed is left untouched.
+
+2. FAITHFUL REPRODUCTION (the experiment): each PDF page is rendered to SVG via
+   PyMuPDF with text kept as real <text> (text_as_path=False). The result
+   reproduces the original layout, charts, tables and colors exactly, while the
+   body text stays selectable / searchable -- i.e. the content is turned into a
+   real web page, not a flat screenshot. Each page SVG is isolated in its own
+   file and embedded responsively, so vector charts stay sharp at any width.
+
+Scanned/image-only PDFs degrade to the embedded raster inside the SVG (an OCR
+text layer is the natural next research step). DB Research PDFs are born-digital,
+so text stays real today. See scripts/README_dbresearch_lab.md.
 """
 import asyncio
 import hashlib
 import html
-import io
 import os
 import re
 import sys
@@ -43,21 +52,23 @@ SOURCE_FEED_URL = os.environ.get(
 FEED_NAME = os.environ.get("DBRESEARCH_LAB_FEED_NAME", "dbresearch_lab")
 OUTPUT_FILE = os.environ.get("DBRESEARCH_LAB_OUTPUT_FILE", f"{FEED_NAME}.xml")
 MAX_ITEMS = int(os.environ.get("DBRESEARCH_LAB_MAX_ITEMS", "40"))
+MAX_PAGES = int(os.environ.get("DBRESEARCH_LAB_MAX_PAGES", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_LAB_TIMEOUT", "60"))
-FIG_SCALE = float(os.environ.get("DBRESEARCH_LAB_FIG_SCALE", "2.0"))
-MIN_PAGE_TEXT = int(os.environ.get("DBRESEARCH_LAB_MIN_PAGE_TEXT", "40"))
-RASTER_FALLBACK = os.environ.get("DBRESEARCH_LAB_RASTER_FALLBACK", "1") != "0"
-MAX_PAGES = int(os.environ.get("DBRESEARCH_LAB_MAX_PAGES", "80"))
 USER_AGENT = os.environ.get(
     "DBRESEARCH_LAB_USER_AGENT",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 )
 HEADERS = {"User-Agent": USER_AGENT}
 BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_LAB_BROWSER_FALLBACK", "1") != "0"
+FORCE_REBUILD = os.environ.get("DBRESEARCH_LAB_FORCE_REBUILD", "0") == "1"
+
+# Bump when the rendering changes so already-published pages are regenerated
+# (from the cached PDF, without re-downloading) on the next run.
+RENDER_VERSION = 2
 
 
 # --------------------------------------------------------------------------- #
-# Small helpers (shared shape with production script)
+# Small helpers
 # --------------------------------------------------------------------------- #
 def fetch_bytes(url: str, timeout: int = REQUEST_TIMEOUT) -> bytes:
     response = requests.get(url, headers=HEADERS, timeout=timeout)
@@ -128,8 +139,30 @@ def is_junk_line(line: str) -> bool:
     return False
 
 
+def extract_text_paragraphs(raw_text: str) -> list:
+    """Light paragraph extraction, only used for the RSS <description> summary."""
+    raw_text = (raw_text or "").replace("\r", "\n").replace("\u00ad", "")
+    raw_text = re.sub(r"-\n(?=[a-z])", "", raw_text)
+    raw_text = re.sub(r"[ \t]+\n", "\n", raw_text)
+    raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", raw_text):
+        lines = []
+        for line in block.splitlines():
+            line = normalize_space(line)
+            if not line or is_junk_line(line):
+                continue
+            lines.append(line)
+        if not lines:
+            continue
+        paragraph = normalize_space(" ".join(lines))
+        if len(paragraph) >= 20:
+            paragraphs.append(paragraph)
+    return paragraphs
+
+
 # --------------------------------------------------------------------------- #
-# PDF fetching (mirrors production: direct -> page scrape -> browser capture)
+# PDF fetching (direct -> page scrape -> browser capture; mirrors production)
 # --------------------------------------------------------------------------- #
 def try_fetch_binary_pdf(session: requests.Session, target_url: str, referer: str = "") -> bytes:
     headers = dict(HEADERS)
@@ -144,7 +177,7 @@ def try_fetch_binary_pdf(session: requests.Session, target_url: str, referer: st
 
 
 async def _fetch_pdf_via_browser(url: str) -> bytes:
-    captured: list[bytes] = []
+    captured = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(user_agent=USER_AGENT)
@@ -205,247 +238,120 @@ def fetch_pdf_bytes(url: str) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# Structured extraction (the experiment)
+# Faithful reproduction: each page -> standalone SVG with real selectable text
 # --------------------------------------------------------------------------- #
-def _median(values: list[float]) -> float:
-    s = sorted(values)
-    n = len(s)
-    if not n:
-        return 0.0
-    mid = n // 2
-    return float(s[mid]) if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+def render_pdf_faithful(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PAGES):
+    """Render every page to its own SVG file.
 
-
-def _overlap(a, b) -> bool:
-    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
-
-
-def _body_font_size(doc) -> float:
-    sizes: list[float] = []
-    for page in doc[: min(len(doc), 5)]:
-        try:
-            data = page.get_text("dict")
-        except Exception:
-            continue
-        for block in data.get("blocks", []):
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    if (span.get("text") or "").strip():
-                        sizes.append(round(float(span.get("size", 0)), 1))
-    return _median(sizes) or 10.0
-
-
-def _table_to_html(tab) -> str:
-    try:
-        rows = tab.extract()
-    except Exception:
-        return ""
-    rows = [r for r in rows if any((c or "").strip() for c in r)]
-    if not rows:
-        return ""
-    out = ['<table class="tbl">']
-    for ri, row in enumerate(rows):
-        tag = "th" if ri == 0 else "td"
-        cells = "".join(f"<{tag}>{html.escape((c or '').strip())}</{tag}>" for c in row)
-        out.append(f"  <tr>{cells}</tr>")
-    out.append("</table>")
-    return "\n".join(out)
-
-
-def _figure_rects(page) -> list[tuple]:
-    page_rect = page.rect
-    page_area = max(page_rect.width * page_rect.height, 1.0)
-    rects: list[tuple] = []
-    # embedded raster images
-    try:
-        for img in page.get_images(full=True):
-            xref = img[0]
-            for r in page.get_image_rects(xref):
-                rects.append((r.x0, r.y0, r.x1, r.y1))
-    except Exception:
-        pass
-    # clustered vector drawings (charts)
-    try:
-        for r in page.cluster_drawings():
-            rects.append((r.x0, r.y0, r.x1, r.y1))
-    except Exception:
-        pass
-    cleaned: list[tuple] = []
-    for r in rects:
-        w, h = r[2] - r[0], r[3] - r[1]
-        if w < 40 or h < 40:
-            continue
-        if (w * h) / page_area > 0.92:  # whole-page => likely text, skip
-            continue
-        cleaned.append(r)
-    # merge overlapping figure rects
-    merged: list[list] = []
-    for r in sorted(cleaned, key=lambda x: (x[1], x[0])):
-        placed = False
-        for m in merged:
-            if _overlap(r, m):
-                m[0], m[1] = min(m[0], r[0]), min(m[1], r[1])
-                m[2], m[3] = max(m[2], r[2]), max(m[3], r[3])
-                placed = True
-                break
-        if not placed:
-            merged.append(list(r))
-    return [tuple(m) for m in merged]
-
-
-def _text_block_html(block, body_size: float):
-    text_lines, sizes, bold = [], [], False
-    for line in block.get("lines", []):
-        parts = []
-        for span in line.get("spans", []):
-            t = span.get("text", "")
-            if t:
-                parts.append(t)
-                sizes.append(float(span.get("size", body_size)))
-                if int(span.get("flags", 0)) & 16:  # bold flag
-                    bold = True
-        line_text = normalize_space("".join(parts))
-        if line_text:
-            text_lines.append(line_text)
-    text = normalize_space(" ".join(text_lines))
-    if not text or is_junk_line(text):
-        return None
-    max_size = max(sizes) if sizes else body_size
-    if max_size >= body_size * 1.45:
-        return ("h2", text, f"<h2>{html.escape(text)}</h2>")
-    if max_size >= body_size * 1.18 or (bold and len(text) < 90):
-        return ("h3", text, f"<h3>{html.escape(text)}</h3>")
-    return ("p", text, f"<p>{html.escape(text)}</p>")
-
-
-def extract_pdf_structured(
-    pdf_bytes: bytes, out_dir: Path, asset_prefix: str = ""
-) -> tuple[str, list[str]]:
-    """Return (html_body, plain_paragraphs). plain_paragraphs feed the RSS desc."""
+    Returns (pages, plain_paragraphs) where pages is a list of dicts:
+        {"name": <file>, "w": <pt>, "h": <pt>, "kind": "svg"|"png"}
+    plain_paragraphs only feeds the RSS <description> summary.
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    body_size = _body_font_size(doc)
-    html_parts: list[str] = []
-    plain: list[str] = []
-    seen_text: set[str] = set()
+    pages = []
+    plain = []
+    seen = set()
     try:
-        total = min(len(doc), MAX_PAGES)
+        total = min(len(doc), max_pages)
         for pi in range(total):
             page = doc.load_page(pi)
-            blocks: list[tuple[float, str]] = []  # (y, html)
-            table_rects: list[tuple] = []
+            rect = page.rect
+            w = float(rect.width) or 612.0
+            h = float(rect.height) or 792.0
             try:
-                finder = page.find_tables()
-                for tab in getattr(finder, "tables", []) or []:
-                    thtml = _table_to_html(tab)
-                    if thtml:
-                        table_rects.append(tuple(tab.bbox))
-                        blocks.append((tab.bbox[1], thtml))
+                # text_as_path=False keeps glyphs as real, selectable <text>.
+                svg = page.get_svg_image(text_as_path=False)
+                svg = re.sub(r"^\s*<\?xml.*?\?>\s*", "", svg, flags=re.S)
+                svg = re.sub(r"^\s*<!DOCTYPE.*?>\s*", "", svg, flags=re.S)
+                name = f"page-{pi + 1:03d}.svg"
+                (out_dir / name).write_text(svg, encoding="utf-8")
+                pages.append({"name": name, "w": w, "h": h, "kind": "svg"})
+            except Exception as exc:
+                print(f"WARN: SVG render failed p{pi + 1}: {exc}; rasterizing")
+                try:
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+                    name = f"page-{pi + 1:03d}.png"
+                    (out_dir / name).write_bytes(pix.tobytes("png"))
+                    pages.append({"name": name, "w": w, "h": h, "kind": "png"})
+                except Exception as exc2:
+                    print(f"WARN: raster fallback failed p{pi + 1}: {exc2}")
+            try:
+                for para in extract_text_paragraphs(page.get_text("text") or ""):
+                    key = para.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    plain.append(para)
             except Exception:
                 pass
-
-            fig_rects = _figure_rects(page)
-            fig_rects = [fr for fr in fig_rects
-                         if not any(_overlap(fr, tr) for tr in table_rects)]
-            for fi, fr in enumerate(fig_rects):
-                try:
-                    clip = fitz.Rect(fr)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE),
-                                          clip=clip, alpha=False)
-                    name = f"p{pi + 1:03d}-fig{fi + 1:02d}.png"
-                    (out_dir / name).write_bytes(pix.tobytes("png"))
-                    blocks.append((fr[1],
-                        f'<figure class="fig">'
-                        f'<img src="{asset_prefix}{name}" alt="Figure {pi+1}.{fi+1}" loading="lazy">'
-                        f'<figcaption>Figure {pi + 1}.{fi + 1}</figcaption></figure>'))
-                except Exception as exc:
-                    print(f"WARN: figure crop failed p{pi+1} f{fi+1}: {exc}")
-
-            page_text_len = 0
-            try:
-                data = page.get_text("dict")
-            except Exception:
-                data = {"blocks": []}
-            for block in data.get("blocks", []):
-                if block.get("type") != 0:
-                    continue
-                bbox = block.get("bbox")
-                if not bbox:
-                    continue
-                if any(_overlap(bbox, tr) for tr in table_rects):
-                    continue
-                if any(_overlap(bbox, fr) for fr in fig_rects):
-                    continue
-                result = _text_block_html(block, body_size)
-                if not result:
-                    continue
-                kind, text, bhtml = result
-                page_text_len += len(text)
-                key = text.lower()
-                if kind == "p":
-                    if key in seen_text:
-                        continue
-                    seen_text.add(key)
-                    plain.append(text)
-                blocks.append((bbox[1], bhtml))
-
-            # image-only / scanned page fallback: render whole page once
-            if page_text_len < MIN_PAGE_TEXT and not fig_rects and RASTER_FALLBACK:
-                try:
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
-                    name = f"p{pi + 1:03d}-full.png"
-                    (out_dir / name).write_bytes(pix.tobytes("png"))
-                    blocks = [(0.0,
-                        f'<figure class="page">'
-                        f'<img src="{asset_prefix}{name}" alt="Page {pi + 1}" loading="lazy">'
-                        f'<figcaption>Page {pi + 1} (image)</figcaption></figure>')]
-                except Exception as exc:
-                    print(f"WARN: page raster fallback failed p{pi+1}: {exc}")
-
-            blocks.sort(key=lambda x: x[0])
-            if blocks:
-                html_parts.append(f'<section class="pg" data-page="{pi + 1}">')
-                html_parts.extend("  " + b[1] for b in blocks)
-                html_parts.append("</section>")
     finally:
         doc.close()
-    return "\n".join(html_parts), plain
+    return pages, plain
 
 
 # --------------------------------------------------------------------------- #
 # HTML page
 # --------------------------------------------------------------------------- #
 PAGE_CSS = """
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #111; background: #fff; }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #111; background: #f3f4f6; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
   h1 { line-height: 1.25; margin: 0 0 12px; }
-  h2 { margin: 32px 0 10px; font-size: 1.4em; }
-  h3 { margin: 22px 0 8px; font-size: 1.15em; color: #222; }
-  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0 24px; }
-  .btn { display: inline-block; padding: 9px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0 22px; }
+  .btn { display: inline-block; padding: 9px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; background: #fff; }
   .btn.primary { background: #111; color: #fff; border-color: #111; }
-  .content { line-height: 1.7; font-size: 16px; }
-  .content p { margin: 0 0 1em; }
-  .pg { margin: 0 0 8px; }
-  figure.fig, figure.page { margin: 18px 0; border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; }
-  figure.fig img, figure.page img { display: block; width: 100%; height: auto; background: #fff; }
-  figure figcaption { padding: 7px 12px; font-size: 13px; color: #666; border-top: 1px solid #eee; }
-  table.tbl { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14px; }
-  table.tbl th, table.tbl td { border: 1px solid #ddd; padding: 6px 9px; text-align: left; vertical-align: top; }
-  table.tbl th { background: #f4f4f4; }
+  .doc { display: flex; flex-direction: column; gap: 16px; }
+  .pg { position: relative; width: 100%; background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,0.18); border-radius: 4px; overflow: hidden; }
+  .pg .pginner { position: absolute; inset: 0; }
+  .pgobj { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+  details.rawtext { margin: 22px 0 0; background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 8px 14px; }
+  details.rawtext summary { cursor: pointer; color: #444; font-size: 14px; }
+  details.rawtext .text { line-height: 1.7; font-size: 15px; max-width: 820px; }
+  details.rawtext .text p { margin: 0.7em 0; }
 """
 
 
+def _page_block(pg: dict, index: int) -> str:
+    w = pg.get("w") or 612.0
+    h = pg.get("h") or 792.0
+    aspect = max(h / w * 100.0, 1.0)
+    name = html.escape(pg["name"])
+    if pg.get("kind") == "png":
+        inner = f'<img class="pgobj" src="{name}" alt="Page {index}" loading="lazy">'
+    else:
+        inner = (
+            f'<object class="pgobj" type="image/svg+xml" data="{name}" '
+            f'aria-label="Page {index}"></object>'
+        )
+    return (
+        f'<div class="pg" data-page="{index}" style="padding-top:{aspect:.3f}%">'
+        f'<div class="pginner">{inner}</div></div>'
+    )
+
+
 def build_local_page(title: str, source_link: str, description: str,
-                     html_body: str, pdf_href: str | None) -> str:
+                     pages: list, plain: list, pdf_href) -> str:
     open_href = html.escape(pdf_href or source_link)
-    body = html_body or '<p>Full-text extraction is currently unavailable for this item.</p>'
+    if pages:
+        doc_html = "\n".join("    " + _page_block(pg, i + 1) for i, pg in enumerate(pages))
+    else:
+        doc_html = '    <p>Faithful reproduction is currently unavailable for this item.</p>'
+    raw_block = ""
+    if plain:
+        paras = "\n".join(f"        <p>{html.escape(p)}</p>" for p in plain[:200])
+        raw_block = "\n".join([
+            '    <details class="rawtext">',
+            '      <summary>Plain text (extracted, for search / accessibility)</summary>',
+            '      <div class="text">',
+            paras,
+            '      </div>',
+            '    </details>',
+        ])
     return "\n".join([
         "<!doctype html>",
         '<html lang="en">',
         "<head>",
         '  <meta charset="utf-8">',
+        f'  <meta name="render-version" content="{RENDER_VERSION}">',
         f"  <title>{html.escape(title)}</title>",
         '  <meta name="viewport" content="width=device-width, initial-scale=1">',
         f"  <style>{PAGE_CSS}</style>",
@@ -458,9 +364,10 @@ def build_local_page(title: str, source_link: str, description: str,
         f'      <a class="btn" href="{open_href}" download>Download PDF</a>',
         f'      <a class="btn" href="{html.escape(source_link)}" target="_blank" rel="noopener">Original source</a>',
         '    </div>',
-        '    <div class="content">',
-        body,
+        '    <div class="doc">',
+        doc_html,
         '    </div>',
+        raw_block,
         '  </div>',
         "</body>",
         "</html>",
@@ -468,7 +375,7 @@ def build_local_page(title: str, source_link: str, description: str,
 
 
 # --------------------------------------------------------------------------- #
-# Feed assembly
+# Incremental state (restore live feed + item pages, same model as production)
 # --------------------------------------------------------------------------- #
 def entry_slug(title: str, link: str, guid: str) -> str:
     path = (urlparse(link).path or "").strip("/")
@@ -477,6 +384,98 @@ def entry_slug(title: str, link: str, guid: str) -> str:
     return f"{base}-{short_hash(guid, link, title)}"
 
 
+def parse_existing_feed(xml_path: Path) -> list:
+    root = ET.parse(xml_path).getroot()
+    channel = root.find("channel")
+    if channel is None:
+        return []
+    items = []
+    for item in channel.findall("item"):
+        link = (item.findtext("link") or "").strip()
+        slug = None
+        parts = [p for p in urlparse(link).path.split("/") if p]
+        if "item" in parts:
+            idx = parts.index("item")
+            if len(parts) > idx + 2 and parts[idx + 1] == FEED_NAME:
+                slug = parts[idx + 2]
+        items.append({
+            "title": (item.findtext("title") or "").strip(),
+            "link": link,
+            "guid": (item.findtext("guid") or "").strip(),
+            "pub_date": (item.findtext("pubDate") or "").strip(),
+            "slug": slug,
+        })
+    return items
+
+
+def restore_live_feed(public_base: str, site_dir: Path) -> bool:
+    feed_url = f"{public_base.rstrip('/')}/{OUTPUT_FILE}"
+    output_path = site_dir / OUTPUT_FILE
+    try:
+        xml_bytes = fetch_bytes(feed_url, timeout=30)
+    except Exception:
+        return False
+    output_path.write_bytes(xml_bytes)
+    try:
+        root = ET.fromstring(xml_bytes)
+        channel = root.find("channel")
+        if channel is None:
+            return True
+        local_prefix = public_base.rstrip("/") + f"/item/{FEED_NAME}/"
+        for item in channel.findall("item"):
+            link = (item.findtext("link") or "").strip()
+            if not link.startswith(local_prefix):
+                continue
+            try:
+                item_bytes = fetch_bytes(link, timeout=30)
+            except Exception:
+                continue
+            item_dir = site_dir / urlparse(link).path.lstrip("/")
+            item_dir.mkdir(parents=True, exist_ok=True)
+            (item_dir / "index.html").write_bytes(item_bytes)
+            html_text = item_bytes.decode("utf-8", errors="ignore")
+            # include data= so embedded SVG/object assets are restored too
+            refs = set(re.findall(r'(?:src|href|data)="([^"]+)"', html_text))
+            for ref in refs:
+                if not ref or ref.startswith(("http://", "https://", "#", "data:")):
+                    continue
+                asset_url = urljoin(link, ref)
+                try:
+                    asset_bytes = fetch_bytes(asset_url, timeout=30)
+                except Exception:
+                    continue
+                asset_path = site_dir / urlparse(asset_url).path.lstrip("/")
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                asset_path.write_bytes(asset_bytes)
+    except Exception:
+        pass
+    return True
+
+
+def load_existing_items(site_dir: Path, public_base: str) -> list:
+    output_path = site_dir / OUTPUT_FILE
+    if not output_path.exists():
+        restore_live_feed(public_base, site_dir)
+    if not output_path.exists():
+        return []
+    try:
+        return parse_existing_feed(output_path)
+    except Exception:
+        return []
+
+
+def local_render_version(index_path: Path) -> int:
+    try:
+        txt = index_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return 0
+    m = re.search(r'name="render-version"\s+content="(\d+)"', txt)
+    return int(m.group(1)) if m else 0
+
+
+# --------------------------------------------------------------------------- #
+# Feed assembly
+# --------------------------------------------------------------------------- #
 def build_feed(site_dir: Path, public_base: str):
     print(f"Fetching source feed: {SOURCE_FEED_URL}")
     parsed = feedparser.parse(SOURCE_FEED_URL)
@@ -486,17 +485,26 @@ def build_feed(site_dir: Path, public_base: str):
     public_base = public_base.rstrip("/")
     item_root = site_dir / "item" / FEED_NAME
     item_root.mkdir(parents=True, exist_ok=True)
+    output_path = site_dir / OUTPUT_FILE
+
+    existing_items = load_existing_items(site_dir, public_base)
+    existing_guid_map = {it["guid"]: it for it in existing_items if it.get("guid")}
+    existing_slug_map = {it["slug"]: it for it in existing_items if it.get("slug")}
 
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = (parsed.feed.get("title") or "DB Research") + " (lab)"
     ET.SubElement(channel, "link").text = f"{public_base}/{OUTPUT_FILE}" if public_base else SOURCE_FEED_URL
-    ET.SubElement(channel, "description").text = "Experimental DB Research feed: structured, figure-preserving full-text pages"
+    ET.SubElement(channel, "description").text = "Experimental DB Research feed: faithful per-page web reproduction with real selectable text"
     ET.SubElement(channel, "language").text = parsed.feed.get("language") or "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
-    ET.SubElement(channel, "generator").text = "DBResearch lab structured localizer"
+    ET.SubElement(channel, "generator").text = "DBResearch lab faithful reproducer"
 
+    output_items = []
+    total_count = 0
+    processed_count = 0
     pdf_count = 0
+
     for entry in parsed.entries[:MAX_ITEMS]:
         title = normalize_space(entry.get("title", "Untitled")) or "Untitled"
         link = entry.get("link", "").strip()
@@ -504,36 +512,77 @@ def build_feed(site_dir: Path, public_base: str):
         guid = (entry.get("id") or entry.get("guid") or link or title).strip()
         pub_date = parse_pub_date(entry.get("published", "") or entry.get("updated", ""))
 
-        final_link, final_guid, is_permalink = link, guid, bool(guid == link and link.startswith("http"))
+        slug = entry_slug(title, link, guid) if is_pdf_url(link) else None
+        existing_item = existing_guid_map.get(guid)
+        if not existing_item and slug:
+            existing_item = existing_slug_map.get(slug)
 
-        if is_pdf_url(link):
-            slug = entry_slug(title, link, guid)
+        # Decide whether we can reuse the already-published page untouched.
+        reuse = False
+        if existing_item and not FORCE_REBUILD:
+            if is_pdf_url(link) and slug:
+                existing_link = (existing_item.get("link") or "").strip()
+                local_index = item_root / slug / "index.html"
+                if (existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
+                        and local_index.exists()
+                        and local_render_version(local_index) >= RENDER_VERSION):
+                    reuse = True
+                elif existing_link.startswith(f"{public_base}/item/{FEED_NAME}/") and local_index.exists():
+                    print(f"INFO: upgrading {link} to render v{RENDER_VERSION} from cached PDF")
+                else:
+                    print(f"INFO: rebuilding missing local page for {link}")
+            else:
+                reuse = True
+
+        if reuse:
+            output_items.append({
+                "title": existing_item.get("title") or title,
+                "link": existing_item.get("link") or link,
+                "guid": existing_item.get("guid") or guid,
+                "pub_date": existing_item.get("pub_date") or pub_date,
+                "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
+            })
+            total_count += 1
+            continue
+
+        final_link, final_guid = link, guid
+        is_permalink = bool(guid == link and link.startswith("http"))
+
+        if is_pdf_url(link) and slug:
             out_dir = item_root / slug
             out_dir.mkdir(parents=True, exist_ok=True)
             local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
+            cached_pdf = out_dir / "original.pdf"
 
             pdf_bytes = None
-            existing_pdf = out_dir / "original.pdf"
-            try:
-                pdf_bytes = fetch_pdf_bytes(link)
-                existing_pdf.write_bytes(pdf_bytes)
-            except Exception as exc:
-                print(f"WARN: fetch PDF failed for {link}: {exc}")
-                if existing_pdf.exists() and existing_pdf.stat().st_size > 1000:
-                    pdf_bytes = existing_pdf.read_bytes()
-
-            html_body, plain = "", []
-            if pdf_bytes:
+            if cached_pdf.exists() and cached_pdf.stat().st_size > 1000:
+                pdf_bytes = cached_pdf.read_bytes()
+                print(f"INFO: reusing cached PDF (no download) for {link}")
+            else:
                 try:
-                    html_body, plain = extract_pdf_structured(pdf_bytes, out_dir, asset_prefix="")
+                    pdf_bytes = fetch_pdf_bytes(link)
+                    cached_pdf.write_bytes(pdf_bytes)
                 except Exception as exc:
-                    print(f"WARN: structured extract failed for {link}: {exc}")
+                    print(f"WARN: fetch PDF failed for {link}: {exc}")
+
+            pages, plain = [], []
+            if pdf_bytes:
+                # clear stale page assets from a previous render version
+                for old in list(out_dir.glob("page-*.svg")) + list(out_dir.glob("page-*.png")) + list(out_dir.glob("p[0-9]*-*.png")):
+                    try:
+                        old.unlink()
+                    except Exception:
+                        pass
+                try:
+                    pages, plain = render_pdf_faithful(pdf_bytes, out_dir)
+                except Exception as exc:
+                    print(f"WARN: faithful render failed for {link}: {exc}")
 
             if not description:
                 description = shorten(plain[0] if plain else title)
 
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, description, html_body,
+                build_local_page(title, link, description, pages, plain,
                                   "original.pdf" if pdf_bytes else None),
                 encoding="utf-8",
             )
@@ -541,18 +590,33 @@ def build_feed(site_dir: Path, public_base: str):
             is_permalink = True
             pdf_count += 1
 
+        processed_count += 1
+        total_count += 1
+        output_items.append({
+            "title": title,
+            "link": final_link,
+            "guid": final_guid,
+            "pub_date": pub_date,
+            "is_permalink": is_permalink,
+        })
+
+    for item in output_items:
         rss_item = ET.SubElement(channel, "item")
-        ET.SubElement(rss_item, "title").text = title
-        ET.SubElement(rss_item, "link").text = final_link
+        ET.SubElement(rss_item, "title").text = item["title"]
+        ET.SubElement(rss_item, "link").text = item["link"]
         guid_el = ET.SubElement(rss_item, "guid")
-        guid_el.set("isPermaLink", "true" if is_permalink else "false")
-        guid_el.text = final_guid
-        ET.SubElement(rss_item, "pubDate").text = pub_date
-        ET.SubElement(rss_item, "description").text = description
+        guid_el.set("isPermaLink", "true" if item["is_permalink"] else "false")
+        guid_el.text = item["guid"]
+        ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
+        desc = ET.SubElement(rss_item, "description")
+
+    if processed_count == 0 and output_path.exists():
+        print(f"no new {FEED_NAME} items; kept existing feed and pages")
+        return
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
-    (site_dir / OUTPUT_FILE).write_bytes(xml_bytes)
-    print(f"Saved {site_dir / OUTPUT_FILE} (pdf_localized={pdf_count})")
+    output_path.write_bytes(xml_bytes)
+    print(f"Saved {output_path} (items={total_count}, processed={processed_count}, pdf_localized={pdf_count})")
 
 
 if __name__ == "__main__":
