@@ -48,6 +48,7 @@ import requests
 from playwright.async_api import async_playwright
 
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
+CONTENT_ENCODED = "{" + CONTENT_NS + "}encoded"
 ET.register_namespace("content", CONTENT_NS)
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +301,7 @@ def _table_to_html(table) -> str:
         return ""
     rows = [[normalize_space(c or "") for c in row] for row in (data or [])]
     rows = [r for r in rows if any(c for c in r)]
-    if not rows or len(rows) < 1:
+    if not rows:
         return ""
     parts = ["<table>"]
     head, body = rows[0], rows[1:]
@@ -367,6 +368,7 @@ def extract_pdf_structured(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX
                     pass
 
             positioned = []
+            bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
             for b in page.get_text("dict").get("blocks", []):
                 if b.get("type") != 0:
                     continue
@@ -394,7 +396,6 @@ def extract_pdf_structured(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX
                 big = max(line_sizes) if line_sizes else median
                 bold = sum(bold_flags) >= max(1, len(bold_flags) // 2)
                 y0, x0 = bbox.y0, bbox.x0
-                bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
                 if big >= 1.45 * median and len(block_text) < 200:
                     positioned.append((y0, x0, ("h2", block_text)))
                 elif (big >= 1.18 * median or bold) and len(block_text) < 160:
@@ -526,7 +527,7 @@ def parse_existing_feed(xml_path: Path) -> list:
             "guid": (item.findtext("guid") or "").strip(),
             "pub_date": (item.findtext("pubDate") or "").strip(),
             "description": (item.findtext("description") or "").strip(),
-            "content_html": (item.findtext(f"{CONTENT_NS}encoded") or ""),
+            "content_html": (item.findtext(CONTENT_ENCODED) or ""),
             "slug": slug,
         })
     return items
@@ -615,7 +616,6 @@ def build_feed(site_dir: Path, public_base: str):
     existing_slug_map = {it["slug"]: it for it in existing_items if it.get("slug")}
 
     rss = ET.Element("rss", version="2.0")
-    rss.set("xmlns:content", CONTENT_NS)
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = (parsed.feed.get("title") or "DB Research") + " (lab)"
     ET.SubElement(channel, "link").text = f"{public_base}/{OUTPUT_FILE}" if public_base else SOURCE_FEED_URL
@@ -741,7 +741,7 @@ def build_feed(site_dir: Path, public_base: str):
         ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
         ET.SubElement(rss_item, "description").text = item.get("description") or ""
         if item.get("content_html"):
-            ET.SubElement(rss_item, f"{CONTENT_NS}encoded").text = item["content_html"]
+            ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
 
     if processed_count == 0 and output_path.exists():
         print(f"no new {FEED_NAME} items; kept existing feed and pages")
