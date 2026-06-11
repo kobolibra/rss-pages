@@ -4,14 +4,11 @@ name: DB Research Lab (experiment)
 # so it never runs on a schedule and never affects the production dbresearch feed
 # or the live GitHub Pages site. It only builds the experimental lab output and
 # uploads it as a downloadable artifact (no commit, no Pages deploy).
+#
+# To build more items, change DBRESEARCH_LAB_MAX_ITEMS below.
 
 on:
-  workflow_dispatch:
-    inputs:
-      max_items:
-        description: "How many feed items to build (keep small for a quick demo)"
-        required: false
-        default: "5"
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -38,7 +35,7 @@ jobs:
 
       - name: Build experimental lab feed
         env:
-          DBRESEARCH_LAB_MAX_ITEMS: $ github.event.inputs.max_items 
+          DBRESEARCH_LAB_MAX_ITEMS: "5"
         run: |
           python scripts/build_dbresearch_lab_feed.py site "https://kobolibra.github.io/rss-pages"
 
