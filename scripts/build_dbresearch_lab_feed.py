@@ -403,6 +403,7 @@ def parse_existing_feed(xml_path: Path) -> list:
             "link": link,
             "guid": (item.findtext("guid") or "").strip(),
             "pub_date": (item.findtext("pubDate") or "").strip(),
+            "description": (item.findtext("description") or "").strip(),
             "slug": slug,
         })
     return items
@@ -540,6 +541,7 @@ def build_feed(site_dir: Path, public_base: str):
                 "link": existing_item.get("link") or link,
                 "guid": existing_item.get("guid") or guid,
                 "pub_date": existing_item.get("pub_date") or pub_date,
+                "description": existing_item.get("description") or description or shorten(title),
                 "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
             })
             total_count += 1
@@ -589,6 +591,8 @@ def build_feed(site_dir: Path, public_base: str):
             final_link = final_guid = local_url
             is_permalink = True
             pdf_count += 1
+        elif not description:
+            description = shorten(title)
 
         processed_count += 1
         total_count += 1
@@ -597,6 +601,7 @@ def build_feed(site_dir: Path, public_base: str):
             "link": final_link,
             "guid": final_guid,
             "pub_date": pub_date,
+            "description": description,
             "is_permalink": is_permalink,
         })
 
@@ -608,7 +613,7 @@ def build_feed(site_dir: Path, public_base: str):
         guid_el.set("isPermaLink", "true" if item["is_permalink"] else "false")
         guid_el.text = item["guid"]
         ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
-        desc = ET.SubElement(rss_item, "description")
+        ET.SubElement(rss_item, "description").text = item.get("description") or ""
 
     if processed_count == 0 and output_path.exists():
         print(f"no new {FEED_NAME} items; kept existing feed and pages")
