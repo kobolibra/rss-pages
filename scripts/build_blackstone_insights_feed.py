@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Blackstone Insights builder: article pages -> reader-friendly semantic HTML.
+"""Blackstone Insights builder: render article pages -> reader-friendly HTML.
 
-The official feed (https://www.blackstone.com/insights/feed/) can't be ingested
-by read-later apps such as Readwise Reader: the /feed/ endpoint is bot-protected
-(returns an unexpected content type), so subscribers get items with no article
-body. This builder instead fetches each Blackstone Insights *article page*,
-extracts the body into clean semantic HTML (headings / paragraphs / lists /
-tables + inline images), writes a local item page, and emits a local feed whose
-items link to those pages and also carry the full article in <content:encoded>.
-That way a reader receives real, extractable text + charts instead of nothing.
+WHY A BROWSER IS REQUIRED
+-------------------------
+Blackstone has aggressive bot protection (Akamai-style), client-side (JS)
+rendering, and a "residency confirmation" interstitial. A plain `requests`
+fetch from CI gets blocked / served a gate / served a JS shell with no article
+body -- which is exactly why the first version captured no text (and also why
+Readwise Reader, another non-browser fetcher, gets nothing from the official
+feed). The only reliable way to obtain the article body is to drive a real
+headless browser, dismiss the residency gate, let the page render, and read the
+resulting DOM.
 
-Incremental model (same as the other builders): restore the published feed and
-item pages from live Pages, reuse already-localized articles, and only fetch /
-re-render newly added ones. Bump RENDER_VERSION to force published pages to
-regenerate on the next run.
+WHAT IT PRODUCES
+----------------
+- site/blackstone_insights.xml : items link to local pages and carry the full
+  article in <content:encoded> (absolute image URLs) so readers get real text.
+- site/item/blackstone_insights/<slug>/index.html : clean semantic page per
+  article (headings / paragraphs / lists / tables + inline <img> charts).
+
+Incremental: restore the published feed + item pages from live Pages, reuse
+already-localized articles, only render newly added ones. Bump RENDER_VERSION
+to force regeneration.
 
 Usage: python scripts/build_blackstone_insights_feed.py <site_dir> <public_base>
 """
+import asyncio
 import html
 import os
 import re
@@ -46,10 +55,12 @@ LIST_URL = os.environ.get("BLACKSTONE_LIST_URL", "https://www.blackstone.com/ins
 FEED_NAME = os.environ.get("BLACKSTONE_FEED_NAME", "blackstone_insights")
 OUTPUT_FILE = os.environ.get("BLACKSTONE_OUTPUT_FILE", f"{FEED_NAME}.xml")
 FEED_TITLE = os.environ.get("BLACKSTONE_FEED_TITLE", "Blackstone Insights")
-FEED_DESC = "Blackstone Insights articles rewritten to local reader-friendly pages with full text and charts."
+FEED_DESC = "Blackstone Insights articles rendered to local reader-friendly pages with full text and charts."
 MAX_ITEMS = int(os.environ.get("BLACKSTONE_MAX_ITEMS", "25"))
+NAV_TIMEOUT = int(os.environ.get("BLACKSTONE_NAV_TIMEOUT", "45"))
 REQUEST_TIMEOUT = int(os.environ.get("BLACKSTONE_TIMEOUT", "45"))
 FORCE_REBUILD = os.environ.get("BLACKSTONE_FORCE_REBUILD", "0") == "1"
+BROWSER_ENABLED = os.environ.get("BLACKSTONE_BROWSER", "1") != "0"
 USER_AGENT = os.environ.get(
     "BLACKSTONE_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -60,9 +71,10 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 ARTICLE_RE = re.compile(r"https://www\.blackstone\.com/insights/article/[a-z0-9\-]+/", re.I)
+GATE_MARKERS = ("i am not a united states resident", "i am a united states resident")
 
 # Bump when rendering changes so published pages regenerate on the next run.
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
 BLOCK_OK = {
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "blockquote",
@@ -137,12 +149,6 @@ def human_date(value: str) -> str:
     return dt.strftime("%B %d, %Y")
 
 
-def fetch_text(session: requests.Session, url: str, timeout: int = REQUEST_TIMEOUT) -> str:
-    response = session.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-    response.raise_for_status()
-    return response.text
-
-
 def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
@@ -156,34 +162,171 @@ def article_slug(url: str) -> str:
     return f"{base}-{short_hash(url)}"
 
 
+def looks_like_gate(html_text: str, plain: str) -> bool:
+    low = (html_text or "").lower()
+    hits = sum(1 for m in GATE_MARKERS if m in low)
+    return hits >= 1 and len(plain) < 600
+
+
 # --------------------------------------------------------------------------- #
-# Article discovery
+# Browser rendering (Playwright Chromium)
 # --------------------------------------------------------------------------- #
-def discover_articles(session: requests.Session) -> list:
+async def _dismiss_gate(page):
+    selectors = [
+        "text=I am a United States Resident",
+        "text=I am not a United States Resident",
+        "text=Accept All",
+        "text=Accept all",
+        "text=Accept",
+        "text=I Agree",
+        "text=Agree",
+    ]
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                await el.click(timeout=3000)
+                await page.wait_for_timeout(1500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _new_context(p):
+    browser = await p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+    )
+    context = await browser.new_context(
+        user_agent=USER_AGENT,
+        locale="en-US",
+        viewport={"width": 1280, "height": 2000},
+    )
+    return browser, context
+
+
+async def _discover_browser():
+    from playwright.async_api import async_playwright
     urls = []
     seen = set()
-    # 1) Official feed first (canonical ordering when reachable).
+    async with async_playwright() as p:
+        browser, context = await _new_context(p)
+        page = await context.new_page()
+        try:
+            await page.goto(LIST_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+            await _dismiss_gate(page)
+            await page.wait_for_timeout(2500)
+            for _ in range(3):
+                try:
+                    more = await page.query_selector("text=Load More")
+                    if not more:
+                        break
+                    await more.click(timeout=3000)
+                    await page.wait_for_timeout(2000)
+                except Exception:
+                    break
+            hrefs = await page.eval_on_selector_all(
+                'a[href*="/insights/article/"]', "els => els.map(e => e.href)"
+            )
+            for href in hrefs or []:
+                m = ARTICLE_RE.match((href or "").split("?")[0].split("#")[0])
+                if m and m.group(0) not in seen:
+                    seen.add(m.group(0))
+                    urls.append(m.group(0))
+        finally:
+            await browser.close()
+    return urls[:MAX_ITEMS]
+
+
+async def _render_browser(urls):
+    from playwright.async_api import async_playwright
+    results = {}
+    async with async_playwright() as p:
+        browser, context = await _new_context(p)
+        page = await context.new_page()
+        try:
+            for url in urls:
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                    await _dismiss_gate(page)
+                    await page.wait_for_timeout(2500)
+                    try:
+                        await page.wait_for_selector("article, main, h1", timeout=8000)
+                    except Exception:
+                        pass
+                    results[url] = await page.content()
+                except Exception as exc:
+                    print(f"WARN: render failed for {url}: {exc}")
+        finally:
+            await browser.close()
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# Requests fallback (used only if the browser is unavailable)
+# --------------------------------------------------------------------------- #
+def _discover_requests(session):
+    urls, seen = [], set()
     try:
-        raw = fetch_text(session, SOURCE_FEED_URL, timeout=30)
+        raw = session.get(SOURCE_FEED_URL, headers=HEADERS, timeout=30).text
         parsed = feedparser.parse(raw)
         for entry in parsed.entries:
-            link = (entry.get("link") or "").strip()
+            link = (entry.get("link") or "").strip().split("?")[0]
             if "/insights/article/" in link and link not in seen:
                 seen.add(link)
                 urls.append(link)
     except Exception as exc:
-        print(f"INFO: source feed not usable ({exc}); falling back to listing page")
-    # 2) Listing page scrape (covers the bot-blocked feed case).
+        print(f"INFO: requests feed discover failed: {exc}")
     if len(urls) < MAX_ITEMS:
         try:
-            listing = fetch_text(session, LIST_URL, timeout=30)
+            listing = session.get(LIST_URL, headers=HEADERS, timeout=30).text
             for match in ARTICLE_RE.findall(listing):
                 if match not in seen:
                     seen.add(match)
                     urls.append(match)
         except Exception as exc:
-            print(f"WARN: listing page fetch failed: {exc}")
+            print(f"WARN: requests listing discover failed: {exc}")
     return urls[:MAX_ITEMS]
+
+
+def _render_requests(session, urls):
+    out = {}
+    for url in urls:
+        try:
+            r = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            r.raise_for_status()
+            out[url] = r.text
+        except Exception as exc:
+            print(f"WARN: requests fetch failed for {url}: {exc}")
+    return out
+
+
+def discover_articles(session):
+    if BROWSER_ENABLED:
+        try:
+            urls = asyncio.run(_discover_browser())
+            if urls:
+                print(f"INFO: discovered {len(urls)} articles via browser")
+                return urls
+            print("WARN: browser discovered 0 articles; trying requests")
+        except Exception as exc:
+            print(f"WARN: browser discover unavailable ({exc}); trying requests")
+    return _discover_requests(session)
+
+
+def render_articles(session, urls):
+    if not urls:
+        return {}
+    if BROWSER_ENABLED:
+        try:
+            res = asyncio.run(_render_browser(urls))
+            if res:
+                return res
+            print("WARN: browser rendered 0 pages; trying requests")
+        except Exception as exc:
+            print(f"WARN: browser rendering unavailable ({exc}); trying requests")
+    return _render_requests(session, urls)
 
 
 # --------------------------------------------------------------------------- #
@@ -251,7 +394,6 @@ def serialize_node(node, base_url: str) -> str:
         if not inner.strip():
             return ""
         return f"<{tag}>{inner}</{tag}>"
-    # Unknown wrapper (div/section/span/...): keep children only.
     return inner
 
 
@@ -312,7 +454,7 @@ def extract_article(html_text: str, url: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Rendering
+# Rendering of the local page
 # --------------------------------------------------------------------------- #
 PAGE_CSS = """
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; color: #1a1a1a; background: #fff; }
@@ -366,7 +508,7 @@ def build_local_page(title: str, source_url: str, content_html: str, date_human:
 
 
 # --------------------------------------------------------------------------- #
-# Incremental state (restore live feed + item pages)
+# Incremental state
 # --------------------------------------------------------------------------- #
 def parse_existing_feed(xml_path: Path) -> list:
     root = ET.parse(xml_path).getroot()
@@ -465,6 +607,20 @@ def build_feed(site_dir: Path, public_base: str):
             print("no article URLs discovered; kept existing feed and pages")
             return
         raise RuntimeError("could not discover any Blackstone Insights article URLs")
+    print(f"INFO: {len(article_urls)} candidate articles")
+
+    # Decide which need rendering (skip reusable ones).
+    to_render = []
+    for url in article_urls:
+        slug = article_slug(url)
+        local_index = item_root / slug / "index.html"
+        existing = existing_slug_map.get(slug)
+        if existing and not FORCE_REBUILD and local_index.exists() and local_render_version(local_index) >= RENDER_VERSION:
+            continue
+        to_render.append(url)
+    print(f"INFO: rendering {len(to_render)} new/updated articles (reusing {len(article_urls) - len(to_render)})")
+
+    html_map = render_articles(session, to_render)
 
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
@@ -473,7 +629,7 @@ def build_feed(site_dir: Path, public_base: str):
     ET.SubElement(channel, "description").text = FEED_DESC
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
-    ET.SubElement(channel, "generator").text = "Blackstone Insights semantic builder"
+    ET.SubElement(channel, "generator").text = "Blackstone Insights browser builder"
 
     output_items = []
     processed_count = 0
@@ -484,16 +640,7 @@ def build_feed(site_dir: Path, public_base: str):
         existing = existing_slug_map.get(slug)
         local_index = item_root / slug / "index.html"
 
-        reuse = False
-        if existing and not FORCE_REBUILD:
-            if local_index.exists() and local_render_version(local_index) >= RENDER_VERSION:
-                reuse = True
-            elif local_index.exists():
-                print(f"INFO: upgrading {url} to render v{RENDER_VERSION}")
-            else:
-                print(f"INFO: rebuilding missing local page for {url}")
-
-        if reuse:
+        def reuse_existing():
             output_items.append({
                 "title": existing.get("title") or url,
                 "link": existing.get("link") or local_url,
@@ -502,36 +649,26 @@ def build_feed(site_dir: Path, public_base: str):
                 "description": existing.get("description") or "",
                 "content_html": existing.get("content_html") or "",
             })
+
+        if url not in html_map:
+            if existing:
+                reuse_existing()
+            else:
+                print(f"WARN: no HTML and no existing copy for {url}; skipping")
             continue
 
-        try:
-            page_html = fetch_text(session, url)
-        except Exception as exc:
-            print(f"WARN: fetch failed for {url}: {exc}")
-            if existing:
-                output_items.append({
-                    "title": existing.get("title") or url,
-                    "link": existing.get("link") or local_url,
-                    "guid": existing.get("guid") or local_url,
-                    "pub_date": existing.get("pub_date") or to_rfc822(""),
-                    "description": existing.get("description") or "",
-                    "content_html": existing.get("content_html") or "",
-                })
-            continue
+        article = extract_article(html_map[url], url)
+        gated = looks_like_gate(html_map[url], article["plain"])
+        print(f"INFO: {url} -> html={len(html_map[url])}B text={len(article['plain'])}chars gate={gated}")
 
-        article = extract_article(page_html, url)
-        if len(article["plain"]) < 200 and not article["content_html"]:
-            print(f"WARN: empty extraction for {url}")
+        if gated or len(article["plain"]) < 200:
+            print(f"WARN: thin/gated extraction for {url} ({len(article['plain'])} chars)")
             if existing:
-                output_items.append({
-                    "title": existing.get("title") or article["title"],
-                    "link": existing.get("link") or local_url,
-                    "guid": existing.get("guid") or local_url,
-                    "pub_date": existing.get("pub_date") or to_rfc822(article["date_raw"]),
-                    "description": existing.get("description") or article["summary"],
-                    "content_html": existing.get("content_html") or "",
-                })
-            continue
+                reuse_existing()
+                continue
+            if len(article["plain"]) < 80:
+                # nothing usable and nothing to fall back on
+                continue
 
         out_dir = item_root / slug
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -570,9 +707,13 @@ def build_feed(site_dir: Path, public_base: str):
         if item.get("content_html"):
             ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
 
-    if processed_count == 0 and output_path.exists():
+    if processed_count == 0 and output_path.exists() and existing_items:
         print(f"no new {FEED_NAME} items; kept existing feed and pages")
         return
+    if not output_items:
+        print(f"WARN: produced 0 items for {FEED_NAME}")
+        if output_path.exists():
+            return
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     output_path.write_bytes(xml_bytes)

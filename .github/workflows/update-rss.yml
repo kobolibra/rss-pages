@@ -112,6 +112,10 @@ jobs:
             python scripts/build_dbresearch_lab_feed.py site "$BASE_URL" \
             || echo "[lab] dbresearch_lab build failed; deploying without it (production feeds unaffected)"
 
+      - name: Install Chromium for Blackstone (non-fatal)
+        run: |
+          python -m playwright install --with-deps chromium || python -m playwright install chromium || echo "[blackstone] chromium install failed; will fall back to requests"
+
       - name: Build Blackstone Insights feed (additive, non-fatal)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
