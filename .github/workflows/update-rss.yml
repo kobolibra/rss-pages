@@ -112,6 +112,15 @@ jobs:
             python scripts/build_dbresearch_lab_feed.py site "$BASE_URL" \
             || echo "[lab] dbresearch_lab build failed; deploying without it (production feeds unaffected)"
 
+      - name: Build Blackstone Insights feed (additive, non-fatal)
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          BLACKSTONE_MAX_ITEMS="${BLACKSTONE_MAX_ITEMS:-25}" \
+            python scripts/build_blackstone_insights_feed.py site "$BASE_URL" \
+            || echo "[blackstone] build failed; deploying without it (production feeds unaffected)"
+
       - name: Add index page
         run: |
           cat > site/index.html <<'EOF'
@@ -132,6 +141,7 @@ jobs:
               <li><a href="dbresearch.xml">dbresearch</a></li>
               <li><a href="dbresearch_lab.xml">dbresearch_lab (experimental)</a></li>
               <li><a href="citadel_market_insights.xml">citadel_market_insights</a></li>
+              <li><a href="blackstone_insights.xml">Blackstone Insights</a></li>
             </ul>
           </body>
           </html>
