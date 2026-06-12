@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
-"""Blackstone Insights builder: render article pages -> reader-friendly HTML.
+"""Blackstone Insights builder: WordPress REST API (full text) + chart screenshots.
 
-WHY A BROWSER IS REQUIRED
--------------------------
-Blackstone has aggressive bot protection (Akamai-style), client-side (JS)
-rendering, and a residency-confirmation interstitial. A plain `requests` fetch
-from CI gets blocked / gated / served a JS shell with no article body. The only
-reliable way to get the content is to drive a real headless browser, dismiss the
-gate, let the page render, scroll to load everything, then read the DOM.
+WHY THIS DESIGN
+---------------
+blackstone.com is a WordPress site whose article HTML is JS-rendered behind
+Akamai-style bot protection, so a plain page fetch returns a shell with no body.
+But the site exposes a clean WordPress REST API for the `insight` post type:
 
-TEXT vs CHARTS
---------------
-* Text: we walk the rendered article in document order and emit semantic HTML
-  for every heading / paragraph / list / blockquote / table -> full article.
-* Charts: Blackstone charts are drawn with JS (SVG/canvas), so they are NOT
-  text and NOT <img> files -- no readability extractor can ever capture them.
-  We therefore SCREENSHOT each chart/graphic element to a PNG and embed it as an
-  inline <img>, interleaved in the correct position.
+    https://www.blackstone.com/wp-json/wp/v2/insight?orderby=date&order=desc
+    https://www.blackstone.com/wp-json/wp/v2/insight/<id>
+
+`content.rendered` there is the COMPLETE article body (headings, paragraphs,
+lists, tables, footnotes, disclosures). That is our source of truth for TEXT.
+
+Charts are drawn client-side (Highcharts SVG) and are NOT present in
+content.rendered (only empty mount points), so no text source can capture them.
+We therefore (best-effort) drive a headless browser to SCREENSHOT each chart and
+splice the PNGs back into the text at the matching chart heading (matched by the
+footnote number, e.g. [1], that appears in both the chart title and the text).
+If the browser is unavailable, the article still ships with full text (charts
+simply omitted).
 
 Output:
-* site/blackstone_insights.xml : items link to local pages and carry the full
-  article in <content:encoded> (absolute image URLs).
+* site/blackstone_insights.xml : items link to local pages, full article in
+  <content:encoded> with absolute image URLs.
 * site/item/blackstone_insights/<slug>/index.html (+ fig-NNN.png chart shots).
 
-Incremental: restore the published feed + item pages from live Pages, reuse
-already-localized articles, only render newly added ones. Bump RENDER_VERSION
-to force regeneration.
+Incremental: restore published feed + item pages from live Pages, reuse already
+localized articles, render only new ones. Bump RENDER_VERSION to force rebuild.
 
 Usage: python scripts/build_blackstone_insights_feed.py <site_dir> <public_base>
 """
 import asyncio
 import html
+import json
 import os
 import re
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
@@ -42,7 +44,6 @@ from urllib.parse import unquote, urljoin, urlparse
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
-import feedparser
 import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -54,8 +55,8 @@ ET.register_namespace("content", CONTENT_NS)
 # Config
 # --------------------------------------------------------------------------- #
 SITE_BASE = "https://www.blackstone.com"
+REST_BASE = os.environ.get("BLACKSTONE_REST_BASE", f"{SITE_BASE}/wp-json/wp/v2/insight")
 SOURCE_FEED_URL = os.environ.get("BLACKSTONE_SOURCE_FEED_URL", "https://www.blackstone.com/insights/feed/")
-LIST_URL = os.environ.get("BLACKSTONE_LIST_URL", "https://www.blackstone.com/insights/")
 FEED_NAME = os.environ.get("BLACKSTONE_FEED_NAME", "blackstone_insights")
 OUTPUT_FILE = os.environ.get("BLACKSTONE_OUTPUT_FILE", f"{FEED_NAME}.xml")
 FEED_TITLE = os.environ.get("BLACKSTONE_FEED_TITLE", "Blackstone Insights")
@@ -72,106 +73,26 @@ USER_AGENT = os.environ.get(
 )
 HEADERS = {
     "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
 ARTICLE_RE = re.compile(r"https://www\.blackstone\.com/insights/article/[a-z0-9\-]+/", re.I)
-GATE_MARKERS = ("i am not a united states resident", "i am a united states resident")
 
 # Bump when rendering changes so published pages regenerate on the next run.
-RENDER_VERSION = 3
+RENDER_VERSION = 4
 
+INLINE_OK = {"strong", "em", "b", "i", "u", "a", "br", "sup", "sub", "code"}
 BLOCK_OK = {
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "blockquote",
     "figure", "figcaption", "table", "thead", "tbody", "tfoot", "tr", "th",
     "td", "caption",
 }
-INLINE_OK = {"strong", "em", "b", "i", "u", "a", "br", "sup", "sub", "code"}
-DROP = {"script", "style", "noscript", "svg", "form", "button", "iframe", "nav", "aside", "header", "footer"}
-TABLE_OK = {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption"}
+DROP = {"script", "style", "noscript", "svg", "form", "button", "iframe",
+        "input", "select", "textarea", "nav", "aside", "header", "footer"}
 
 # --------------------------------------------------------------------------- #
-# Browser-side JS
+# Browser-side JS (charts only)
 # --------------------------------------------------------------------------- #
-META_JS = """() => {
-  const pick = (s) => { const e = document.querySelector(s); return e ? (e.content || '') : ''; };
-  return {
-    title: pick('meta[property=\"og:title\"]') || document.title || '',
-    desc: pick('meta[property=\"og:description\"]') || pick('meta[name=\"description\"]') || '',
-    date: pick('meta[property=\"article:published_time\"]') || pick('meta[property=\"article:modified_time\"]') || ''
-  };
-}"""
-
-WALK_JS = """() => {
-  const root = document.querySelector('article') || document.querySelector('main') || document.body;
-  if (!root) return [];
-  const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','NAV','FOOTER','HEADER','ASIDE','FORM','BUTTON','INPUT','SELECT','TEXTAREA']);
-  const out = [];
-  let idx = 0;
-  function chartAncestor(el){
-    let best = el, p = el.parentElement, hops = 0;
-    while (p && p !== root && hops < 4){
-      const c = (p.className || '') + '';
-      if (/chart|graphic|visual|exhibit|figure|highcharts|tableau|d3/i.test(c)) best = p;
-      p = p.parentElement; hops++;
-    }
-    return best;
-  }
-  function tagGraphic(el, caption){
-    const t = chartAncestor(el);
-    const r = t.getBoundingClientRect();
-    if (r.width < 80 || r.height < 60) return false;
-    if (t.getAttribute('data-bx-idx')) return true;
-    idx++; t.setAttribute('data-bx-idx', String(idx));
-    out.push({type:'graphic', idx: idx, caption: caption || ''});
-    return true;
-  }
-  function walk(node){
-    for (const el of node.children){
-      const tag = el.tagName;
-      if (skip.has(tag)) continue;
-      let st = null;
-      try { st = window.getComputedStyle(el); } catch (e) {}
-      if (st && (st.display === 'none' || st.visibility === 'hidden')) continue;
-      if (tag === 'SVG' || tag === 'svg' || tag === 'CANVAS'){ tagGraphic(el, ''); continue; }
-      if (tag === 'IMG'){
-        const src = el.currentSrc || el.src || '';
-        const r = el.getBoundingClientRect();
-        if (src && r.width >= 80 && r.height >= 50) out.push({type:'img', src: src, alt: el.alt || ''});
-        continue;
-      }
-      if (tag === 'FIGURE'){
-        const cf = el.querySelector('figcaption');
-        const cap = cf ? cf.innerText.trim() : '';
-        const g = el.querySelector('svg, canvas');
-        if (g){ if (tagGraphic(g, cap)) continue; }
-        const im = el.querySelector('img');
-        if (im){ const src = im.currentSrc || im.src || ''; if (src){ out.push({type:'img', src: src, alt: im.alt || cap}); continue; } }
-        walk(el); continue;
-      }
-      if (tag === 'TABLE'){ out.push({type:'table', html: el.outerHTML}); continue; }
-      if (tag === 'UL' || tag === 'OL'){
-        const items = Array.from(el.querySelectorAll(':scope > li')).map(li => li.innerText.trim()).filter(Boolean);
-        if (items.length) out.push({type:'list', ordered: tag === 'OL', items: items});
-        continue;
-      }
-      if (tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4' || tag === 'H5' || tag === 'H6'){
-        const txt = el.innerText.trim();
-        if (txt) out.push({type:'heading', level: Math.min(parseInt(tag[1]), 4), text: txt});
-        continue;
-      }
-      if (tag === 'P' || tag === 'BLOCKQUOTE'){
-        const txt = el.innerText.trim();
-        if (txt) out.push({type: tag === 'P' ? 'p' : 'blockquote', text: txt});
-        continue;
-      }
-      walk(el);
-    }
-  }
-  walk(root);
-  return out;
-}"""
-
 AUTOSCROLL_JS = """() => new Promise((resolve) => {
   let total = 0; const step = 700;
   const timer = setInterval(() => {
@@ -180,6 +101,52 @@ AUTOSCROLL_JS = """() => new Promise((resolve) => {
   }, 180);
   setTimeout(() => { clearInterval(timer); resolve(); }, 9000);
 })"""
+
+# Find chart graphics in document order, tag each container with data-bx-idx, and
+# capture the nearest PRECEDING heading text (which carries the footnote [N]).
+CHART_JS = """() => {
+  const root = document.querySelector('article') || document.querySelector('main') || document.body;
+  if (!root) return [];
+  const out = [];
+  let idx = 0;
+  const seen = new Set();
+  const heads = Array.from(root.querySelectorAll('h2, h3, h4'));
+  function chartAncestor(el){
+    let best = el, p = el.parentElement, hops = 0;
+    while (p && p !== root && hops < 5){
+      const c = ((p.className || '') + '');
+      if (/chart|graphic|visual|exhibit|figure|highcharts|tableau|d3|datawrapper|flourish/i.test(c)) best = p;
+      p = p.parentElement; hops++;
+    }
+    return best;
+  }
+  function nearHeading(el){
+    let best = '';
+    for (const h of heads){
+      const pos = h.compareDocumentPosition(el);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING){
+        const t = h.innerText.trim();
+        if (t) best = t;
+      } else {
+        break;
+      }
+    }
+    return best;
+  }
+  const graphics = root.querySelectorAll('svg, canvas');
+  for (const g of graphics){
+    const t = chartAncestor(g);
+    if (seen.has(t)) continue;
+    const r = t.getBoundingClientRect();
+    if (r.width < 120 || r.height < 90) continue;
+    if (t.getAttribute('data-bx-idx')) continue;
+    seen.add(t);
+    idx++;
+    t.setAttribute('data-bx-idx', String(idx));
+    out.push({idx: idx, caption: nearHeading(g)});
+  }
+  return out;
+}"""
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +181,8 @@ def shorten(value: str, max_len: int = 420) -> str:
 
 
 def strip_tags(value: str) -> str:
-    value = re.sub(r"<[^>]+>", " ", value or "")
+    value = re.sub(r"<!--.*?-->", " ", value or "", flags=re.S)
+    value = re.sub(r"<[^>]+>", " ", value)
     return normalize_space(value)
 
 
@@ -259,251 +227,9 @@ def article_slug(url: str) -> str:
     return f"{base}-{short_hash(url)}"
 
 
-def sanitize_table(html_str: str) -> str:
-    try:
-        soup = BeautifulSoup(html_str or "", "html.parser")
-    except Exception:
-        return ""
-    table = soup.find("table")
-    if not table:
-        return ""
-    for tag in table.find_all(True):
-        if tag.name in TABLE_OK:
-            tag.attrs = {}
-        else:
-            tag.unwrap()
-    table.attrs = {}
-    text = strip_tags(str(table))
-    if len(text) < 4:
-        return ""
-    return f'<div class="tablewrap">{table}</div>'
-
-
-def looks_like_gate(plain: str, raw_lower: str) -> bool:
-    hits = sum(1 for m in GATE_MARKERS if m in raw_lower)
-    return hits >= 1 and len(plain) < 600
-
-
 # --------------------------------------------------------------------------- #
-# Block -> HTML
+# REST content.rendered -> clean reader HTML
 # --------------------------------------------------------------------------- #
-def blocks_to_html(blocks, img_prefix: str) -> str:
-    parts = []
-    for b in blocks:
-        if b.get("drop"):
-            continue
-        t = b.get("type")
-        if t == "heading":
-            lvl = max(2, min(4, int(b.get("level", 2) or 2)))
-            tx = normalize_space(b.get("text", ""))
-            if tx:
-                parts.append(f"<h{lvl}>{html.escape(tx)}</h{lvl}>")
-        elif t == "p":
-            tx = normalize_space(b.get("text", ""))
-            if tx:
-                parts.append(f"<p>{html.escape(tx)}</p>")
-        elif t == "blockquote":
-            tx = normalize_space(b.get("text", ""))
-            if tx:
-                parts.append(f"<blockquote>{html.escape(tx)}</blockquote>")
-        elif t == "list":
-            tag = "ol" if b.get("ordered") else "ul"
-            lis = "".join(
-                f"<li>{html.escape(normalize_space(x))}</li>"
-                for x in b.get("items", []) if normalize_space(x)
-            )
-            if lis:
-                parts.append(f"<{tag}>{lis}</{tag}>")
-        elif t == "table":
-            tb = sanitize_table(b.get("html", ""))
-            if tb:
-                parts.append(tb)
-        elif t == "img":
-            src = b.get("src", "")
-            if src.startswith("http"):
-                alt = html.escape(b.get("alt") or "", quote=True)
-                parts.append(f'<figure><img src="{html.escape(src, quote=True)}" alt="{alt}" loading="lazy"></figure>')
-        elif t == "graphic" and b.get("file"):
-            src = img_prefix + b["file"]
-            cap = html.escape(normalize_space(b.get("caption") or ""))
-            cap_html = f"<figcaption>{cap}</figcaption>" if cap else ""
-            parts.append(f'<figure><img src="{html.escape(src, quote=True)}" alt="{cap or "chart"}" loading="lazy">{cap_html}</figure>')
-    return "\n".join(parts)
-
-
-# --------------------------------------------------------------------------- #
-# Browser discovery + rendering/extraction/screenshots
-# --------------------------------------------------------------------------- #
-async def _dismiss_gate(page):
-    selectors = [
-        "text=I am a United States Resident",
-        "text=I am not a United States Resident",
-        "text=Accept All",
-        "text=Accept all",
-        "text=Accept",
-        "text=I Agree",
-        "text=Agree",
-    ]
-    for sel in selectors:
-        try:
-            el = await page.query_selector(sel)
-            if el:
-                await el.click(timeout=3000)
-                await page.wait_for_timeout(1500)
-                return True
-        except Exception:
-            continue
-    return False
-
-
-async def _new_context(p):
-    browser = await p.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
-    )
-    context = await browser.new_context(
-        user_agent=USER_AGENT,
-        locale="en-US",
-        viewport={"width": 1280, "height": 2000},
-        device_scale_factor=2,
-    )
-    return browser, context
-
-
-async def _discover_browser():
-    from playwright.async_api import async_playwright
-    urls, seen = [], set()
-    async with async_playwright() as p:
-        browser, context = await _new_context(p)
-        page = await context.new_page()
-        try:
-            await page.goto(LIST_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-            await _dismiss_gate(page)
-            await page.wait_for_timeout(2500)
-            for _ in range(3):
-                try:
-                    more = await page.query_selector("text=Load More")
-                    if not more:
-                        break
-                    await more.click(timeout=3000)
-                    await page.wait_for_timeout(2000)
-                except Exception:
-                    break
-            hrefs = await page.eval_on_selector_all(
-                'a[href*="/insights/article/"]', "els => els.map(e => e.href)"
-            )
-            for href in hrefs or []:
-                m = ARTICLE_RE.match((href or "").split("?")[0].split("#")[0])
-                if m and m.group(0) not in seen:
-                    seen.add(m.group(0))
-                    urls.append(m.group(0))
-        finally:
-            await browser.close()
-    return urls[:MAX_ITEMS]
-
-
-async def _process_async(jobs):
-    from playwright.async_api import async_playwright
-    results = {}
-    async with async_playwright() as p:
-        browser, context = await _new_context(p)
-        page = await context.new_page()
-        try:
-            for job in jobs:
-                url, out_dir, local_url = job["url"], job["out_dir"], job["local_url"]
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-                    await _dismiss_gate(page)
-                    await page.wait_for_timeout(2000)
-                    try:
-                        await page.wait_for_selector("article, main, h1", timeout=8000)
-                    except Exception:
-                        pass
-                    try:
-                        await page.evaluate(AUTOSCROLL_JS)
-                        await page.evaluate("window.scrollTo(0, 0)")
-                        await page.wait_for_timeout(800)
-                    except Exception:
-                        pass
-
-                    meta = await page.evaluate(META_JS)
-                    blocks = await page.evaluate(WALK_JS)
-
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    for old in out_dir.glob("fig-*.png"):
-                        try:
-                            old.unlink()
-                        except Exception:
-                            pass
-
-                    fig_i = 0
-                    for b in blocks:
-                        if b.get("type") != "graphic":
-                            continue
-                        if fig_i >= MAX_FIGS:
-                            b["drop"] = True
-                            continue
-                        sel = '[data-bx-idx="' + str(b.get("idx")) + '"]'
-                        el = await page.query_selector(sel)
-                        if not el:
-                            b["drop"] = True
-                            continue
-                        try:
-                            await el.scroll_into_view_if_needed(timeout=4000)
-                            await page.wait_for_timeout(450)
-                            fig_i += 1
-                            name = f"fig-{fig_i:03d}.png"
-                            buf = await el.screenshot(timeout=9000)
-                            (out_dir / name).write_bytes(buf)
-                            b["file"] = name
-                        except Exception as exc:
-                            print(f"WARN: chart screenshot failed {url} #{b.get('idx')}: {exc}")
-                            b["drop"] = True
-
-                    title = normalize_space(re.sub(r"\s*[-|]\s*Blackstone\s*$", "", meta.get("title") or "")) or "Untitled"
-                    page_html = blocks_to_html(blocks, "")
-                    feed_html = blocks_to_html(blocks, local_url)
-                    plain = strip_tags(page_html)
-                    n_figs = sum(1 for b in blocks if b.get("file"))
-                    summary = normalize_space(meta.get("desc") or "") or shorten(plain)
-                    date_raw = meta.get("date") or ""
-
-                    print(f"INFO: {url} -> text={len(plain)}chars figs={n_figs} blocks={len(blocks)}")
-                    if len(plain) < 60 and n_figs == 0:
-                        print(f"WARN: empty extraction for {url}")
-                        continue
-
-                    (out_dir / "index.html").write_text(
-                        build_local_page(title, url, page_html, human_date(date_raw)),
-                        encoding="utf-8",
-                    )
-                    results[url] = {
-                        "title": title,
-                        "summary": summary,
-                        "date_raw": date_raw,
-                        "feed_html": feed_html,
-                        "plain": plain,
-                    }
-                except Exception as exc:
-                    print(f"WARN: processing failed for {url}: {exc}")
-        finally:
-            await browser.close()
-    return results
-
-
-# --------------------------------------------------------------------------- #
-# Requests fallback (text-only; no charts) used if the browser is unavailable
-# --------------------------------------------------------------------------- #
-def meta_prop(soup, prop):
-    tag = soup.find("meta", attrs={"property": prop})
-    return (tag.get("content") or "").strip() if tag and tag.get("content") else ""
-
-
-def meta_name(soup, name):
-    tag = soup.find("meta", attrs={"name": name})
-    return (tag.get("content") or "").strip() if tag and tag.get("content") else ""
-
-
 def img_html(node, base_url):
     src = node.get("src") or node.get("data-src") or ""
     if not src or src.startswith("data:"):
@@ -550,115 +276,253 @@ def serialize_children(node, base_url):
     return "\n".join(filter(None, (serialize_node(c, base_url) for c in node.children)))
 
 
-def pick_content_node(soup):
-    scores = defaultdict(float)
-    for el in soup.find_all(["p", "li", "blockquote", "h2", "h3", "h4"]):
-        text = el.get_text(" ", strip=True)
-        if len(text) < 25:
-            continue
-        score = 1.0 + min(len(text) / 100.0, 5.0)
-        node, weight = el.parent, 1.0
-        for _ in range(3):
-            if node is None or not isinstance(node, Tag):
-                break
-            scores[node] += score * weight
-            weight *= 0.5
-            node = node.parent
-    if not scores:
-        return soup.body or soup
-    return max(scores, key=lambda n: scores[n])
-
-
-def extract_article_requests(html_text, url):
-    soup = BeautifulSoup(html_text, "html.parser")
-    title = meta_prop(soup, "og:title") or (soup.title.get_text(strip=True) if soup.title else "")
-    title = normalize_space(re.sub(r"\s*[-|]\s*Blackstone\s*$", "", title or "")) or "Untitled"
-    summary = normalize_space(meta_prop(soup, "og:description") or meta_name(soup, "description"))
-    date_raw = meta_prop(soup, "article:published_time") or meta_prop(soup, "article:modified_time")
+def clean_rest_content(content_html, base_url, title):
+    soup = BeautifulSoup(content_html or "", "html.parser")
     for tag in soup.find_all(list(DROP)):
         tag.decompose()
-    node = pick_content_node(soup)
-    content_html = serialize_children(node, url) if node else ""
-    plain = strip_tags(content_html)
-    if not summary:
-        summary = shorten(plain)
-    return {"title": title, "summary": summary, "date_raw": date_raw, "content_html": content_html, "plain": plain}
+    body = serialize_children(soup, base_url)
+    body = re.sub(r"\n{2,}", "\n", body)
+    # Drop a leading heading that just repeats the article title.
+    t_esc = re.escape(html.escape(normalize_space(title)))
+    body = re.sub(r'^\s*<h2>\s*' + t_esc + r'\s*</h2>\s*', "", body, count=1, flags=re.I)
+    # Mark chart slots: an <h4> whose text contains a footnote bracket like [ 1 ].
+    def _mark(m):
+        seg = m.group(0)
+        fm = re.search(r"\[\s*(\d+)\s*\]", seg)
+        return seg + ("<!--BXCHART:%d-->" % int(fm.group(1)) if fm else "")
+    body = re.sub(r"<h4>.*?</h4>", _mark, body, flags=re.S)
+    return body.strip()
 
 
-def fallback_process(session, jobs):
-    results = {}
-    for job in jobs:
-        url, out_dir = job["url"], job["out_dir"]
+def _figure_html(src, caption):
+    cap = normalize_space(re.sub(r"\[\s*\d+\s*\]", "", caption or ""))
+    cap_html = "<figcaption>%s</figcaption>" % html.escape(cap) if cap else ""
+    return '<figure><img src="%s" alt="%s" loading="lazy">%s</figure>' % (
+        html.escape(src, quote=True), html.escape(cap or "chart", quote=True), cap_html)
+
+
+def inject_charts(body, chart_map, img_prefix):
+    used = set()
+
+    def _repl(m):
+        no = int(m.group(1))
+        info = chart_map.get(no)
+        if info and info.get("file"):
+            used.add(no)
+            return _figure_html(img_prefix + info["file"], info.get("caption"))
+        return ""
+
+    out = re.sub(r"<!--BXCHART:(\d+)-->", _repl, body)
+    leftovers = [info for key, info in sorted(chart_map.items(), key=lambda kv: kv[0])
+                 if key not in used and info.get("file")]
+    if leftovers:
+        figs = "".join(_figure_html(img_prefix + i["file"], i.get("caption")) for i in leftovers)
+        out += "\n<h3>Exhibits</h3>\n" + figs
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# JSON fetch (requests, with browser fallback that bypasses bot protection)
+# --------------------------------------------------------------------------- #
+async def _browser_get_json(url):
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser, context = await _new_context(p)
         try:
-            r = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            r.raise_for_status()
-            art = extract_article_requests(r.text, url)
+            resp = await context.request.get(url, timeout=NAV_TIMEOUT * 1000)
+            text = await resp.text()
+            return json.loads(text)
+        finally:
+            await browser.close()
+
+
+def fetch_json(url, session):
+    try:
+        r = session.get(url, headers={**HEADERS, "Accept": "application/json"},
+                        timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        ctype = (r.headers.get("content-type") or "").lower()
+        if r.status_code == 200 and "json" in ctype:
+            return r.json()
+        print(f"INFO: REST via requests -> status={r.status_code} type={ctype}")
+    except Exception as exc:
+        print(f"INFO: REST via requests failed: {exc}")
+    if BROWSER_ENABLED:
+        try:
+            return asyncio.run(_browser_get_json(url))
         except Exception as exc:
-            print(f"WARN: fallback fetch failed for {url}: {exc}")
-            continue
-        gated = looks_like_gate(art["plain"], (r.text or "").lower())
-        print(f"INFO(fallback): {url} -> text={len(art['plain'])}chars gate={gated}")
-        if gated or len(art["plain"]) < 120:
-            continue
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "index.html").write_text(
-            build_local_page(art["title"], url, art["content_html"], human_date(art["date_raw"])),
-            encoding="utf-8",
-        )
-        results[url] = {
-            "title": art["title"],
-            "summary": art["summary"],
-            "date_raw": art["date_raw"],
-            "feed_html": art["content_html"],
-            "plain": art["plain"],
-        }
-    return results
+            print(f"WARN: REST via browser failed: {exc}")
+    return None
+
+
+def fetch_insight_posts(session):
+    fields = "id,link,date,date_gmt,modified_gmt,title,excerpt,content"
+    url = f"{REST_BASE}?per_page={MAX_ITEMS}&orderby=date&order=desc&_fields={fields}"
+    data = fetch_json(url, session)
+    if isinstance(data, list):
+        print(f"INFO: REST returned {len(data)} insight posts")
+        return data
+    print("WARN: REST insight list unavailable or not a list")
+    return []
 
 
 def discover_articles(session):
-    if BROWSER_ENABLED:
-        try:
-            urls = asyncio.run(_discover_browser())
-            if urls:
-                print(f"INFO: discovered {len(urls)} articles via browser")
-                return urls
-            print("WARN: browser discovered 0 articles; trying requests")
-        except Exception as exc:
-            print(f"WARN: browser discover unavailable ({exc}); trying requests")
-    urls, seen = [], set()
-    try:
-        raw = session.get(SOURCE_FEED_URL, headers=HEADERS, timeout=30).text
-        for entry in feedparser.parse(raw).entries:
-            link = (entry.get("link") or "").strip().split("?")[0]
-            if "/insights/article/" in link and link not in seen:
-                seen.add(link)
-                urls.append(link)
-    except Exception as exc:
-        print(f"INFO: requests feed discover failed: {exc}")
-    if len(urls) < MAX_ITEMS:
-        try:
-            listing = session.get(LIST_URL, headers=HEADERS, timeout=30).text
-            for match in ARTICLE_RE.findall(listing):
-                if match not in seen:
-                    seen.add(match)
-                    urls.append(match)
-        except Exception as exc:
-            print(f"WARN: requests listing discover failed: {exc}")
-    return urls[:MAX_ITEMS]
+    posts = fetch_insight_posts(session)
+    posts_by_url, urls = {}, []
+    for post in posts:
+        link = (post.get("link") or "").split("?")[0].split("#")[0]
+        m = ARTICLE_RE.match(link)
+        if not m:
+            continue
+        link = m.group(0)
+        if link in posts_by_url:
+            continue
+        posts_by_url[link] = post
+        urls.append(link)
+        if len(urls) >= MAX_ITEMS:
+            break
+    return urls, posts_by_url
 
 
-def process_jobs(session, jobs):
+# --------------------------------------------------------------------------- #
+# Browser chart screenshots (best-effort)
+# --------------------------------------------------------------------------- #
+async def _new_context(p):
+    browser = await p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+    )
+    context = await browser.new_context(
+        user_agent=USER_AGENT,
+        locale="en-US",
+        viewport={"width": 1280, "height": 2000},
+        device_scale_factor=2,
+    )
+    return browser, context
+
+
+async def _dismiss_gate(page):
+    selectors = [
+        "text=I am a United States Resident",
+        "text=I am not a United States Resident",
+        "text=Accept All",
+        "text=Accept all",
+        "text=Accept",
+        "text=I Agree",
+        "text=Agree",
+    ]
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                await el.click(timeout=3000)
+                await page.wait_for_timeout(1500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _capture_charts(jobs):
+    from playwright.async_api import async_playwright
+    maps = {}
+    async with async_playwright() as p:
+        browser, context = await _new_context(p)
+        page = await context.new_page()
+        try:
+            for job in jobs:
+                url, out_dir = job["url"], job["out_dir"]
+                cmap = {}
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                    await _dismiss_gate(page)
+                    await page.wait_for_timeout(2000)
+                    try:
+                        await page.evaluate(AUTOSCROLL_JS)
+                        await page.evaluate("window.scrollTo(0, 0)")
+                        await page.wait_for_timeout(700)
+                    except Exception:
+                        pass
+                    charts = await page.evaluate(CHART_JS)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    for old in out_dir.glob("fig-*.png"):
+                        try:
+                            old.unlink()
+                        except Exception:
+                            pass
+                    fig_i, neg = 0, 0
+                    for c in charts or []:
+                        if fig_i >= MAX_FIGS:
+                            break
+                        sel = '[data-bx-idx="' + str(c.get("idx")) + '"]'
+                        el = await page.query_selector(sel)
+                        if not el:
+                            continue
+                        try:
+                            await el.scroll_into_view_if_needed(timeout=4000)
+                            await page.wait_for_timeout(450)
+                            fig_i += 1
+                            name = f"fig-{fig_i:03d}.png"
+                            (out_dir / name).write_bytes(await el.screenshot(timeout=9000))
+                            cap = normalize_space(c.get("caption") or "")
+                            fm = re.search(r"\[\s*(\d+)\s*\]", cap)
+                            if fm:
+                                key = int(fm.group(1))
+                            else:
+                                neg -= 1
+                                key = neg
+                            cmap[key] = {"file": name, "caption": cap}
+                        except Exception as exc:
+                            print(f"WARN: chart screenshot failed {url}: {exc}")
+                    print(f"INFO: {url} -> charts captured={fig_i}")
+                except Exception as exc:
+                    print(f"WARN: chart render failed for {url}: {exc}")
+                maps[url] = cmap
+        finally:
+            await browser.close()
+    return maps
+
+
+def process_jobs(jobs):
     if not jobs:
         return {}
+    chart_maps = {}
     if BROWSER_ENABLED:
         try:
-            res = asyncio.run(_process_async(jobs))
-            if res:
-                return res
-            print("WARN: browser produced 0 results; trying requests fallback")
+            chart_maps = asyncio.run(_capture_charts(jobs))
         except Exception as exc:
-            print(f"WARN: browser processing unavailable ({exc}); trying requests fallback")
-    return fallback_process(session, jobs)
+            print(f"WARN: browser charts unavailable ({exc}); shipping text-only")
+    results = {}
+    for job in jobs:
+        url, post = job["url"], job["post"]
+        out_dir, local_url = job["out_dir"], job["local_url"]
+        title = normalize_space(strip_tags((post.get("title") or {}).get("rendered", ""))) or "Untitled"
+        content_html = (post.get("content") or {}).get("rendered", "") or ""
+        cmap = chart_maps.get(url, {})
+        clean = clean_rest_content(content_html, url, title)
+        if not clean.strip() and not cmap:
+            print(f"WARN: empty REST content for {url}; skipping")
+            continue
+        page_html = inject_charts(clean, cmap, "")
+        feed_html = inject_charts(clean, cmap, local_url)
+        plain = strip_tags(page_html)
+        excerpt = normalize_space(strip_tags((post.get("excerpt") or {}).get("rendered", "")))
+        summary = excerpt or shorten(plain)
+        date_raw = post.get("date_gmt") or post.get("date") or ""
+        n_figs = sum(1 for v in cmap.values() if v.get("file"))
+        print(f"INFO: {url} -> text={len(plain)}chars figs={n_figs}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "index.html").write_text(
+            build_local_page(title, url, page_html, human_date(date_raw)),
+            encoding="utf-8",
+        )
+        results[url] = {
+            "title": title,
+            "summary": summary,
+            "date_raw": date_raw,
+            "feed_html": feed_html,
+            "plain": plain,
+        }
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -822,7 +686,7 @@ def build_feed(site_dir, public_base):
     existing_items = load_existing_items(site_dir, public_base)
     existing_slug_map = {it["slug"]: it for it in existing_items if it.get("slug")}
 
-    article_urls = discover_articles(session)
+    article_urls, posts_by_url = discover_articles(session)
     if not article_urls:
         if output_path.exists():
             print("no article URLs discovered; kept existing feed and pages")
@@ -839,10 +703,16 @@ def build_feed(site_dir, public_base):
         if existing and not FORCE_REBUILD and local_index.exists() and local_render_version(local_index) >= RENDER_VERSION:
             reuse_map[url] = existing
             continue
-        jobs.append({"url": url, "slug": slug, "out_dir": item_root / slug, "local_url": local_url})
+        jobs.append({
+            "url": url,
+            "slug": slug,
+            "out_dir": item_root / slug,
+            "local_url": local_url,
+            "post": posts_by_url[url],
+        })
     print(f"INFO: rendering {len(jobs)} new/updated articles (reusing {len(reuse_map)})")
 
-    results = process_jobs(session, jobs)
+    results = process_jobs(jobs)
 
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
@@ -851,7 +721,7 @@ def build_feed(site_dir, public_base):
     ET.SubElement(channel, "description").text = FEED_DESC
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
-    ET.SubElement(channel, "generator").text = "Blackstone Insights browser builder"
+    ET.SubElement(channel, "generator").text = "Blackstone Insights REST builder"
 
     output_items = []
     processed_count = 0
