@@ -29,6 +29,12 @@ Output:
 Incremental: restore published feed + item pages from live Pages, reuse already
 localized articles, render only new ones. Bump RENDER_VERSION to force rebuild.
 
+Local item pages are regenerated each run and shipped inside the Pages artifact
+(they are NOT committed to the repo). To make sure the feed's local links never
+404 -- even on a run that kept an existing feed without re-rendering pages -- we
+self-heal: any feed item missing its on-disk page is rebuilt from the feed's
+content:encoded HTML before deploy (see ensure_local_pages).
+
 Usage: python scripts/build_blackstone_insights_feed.py <site_dir> <public_base>
 """
 import asyncio
@@ -521,6 +527,7 @@ def process_jobs(jobs):
             "date_raw": date_raw,
             "feed_html": feed_html,
             "plain": plain,
+            "source_url": url,
         }
     return results
 
@@ -555,6 +562,13 @@ PAGE_CSS = """
 def build_local_page(title, source_url, content_html, date_human):
     body = content_html or "<p>Content could not be extracted from this article.</p>"
     meta = f'<div class="meta">{html.escape(date_human)}</div>' if date_human else ""
+    view_btn = ""
+    if source_url and source_url.startswith("http") and "blackstone.com" in source_url:
+        view_btn = (
+            f'      <a class="btn primary" href="{html.escape(source_url, quote=True)}" '
+            f'target="_blank" rel="noopener">View on Blackstone</a>'
+        )
+    actions = f'    <div class="actions">\n{view_btn}\n    </div>' if view_btn else ""
     return "\n".join([
         "<!doctype html>",
         '<html lang="en">',
@@ -570,9 +584,7 @@ def build_local_page(title, source_url, content_html, date_human):
         '  <article class="wrap">',
         f"    <h1>{html.escape(title)}</h1>",
         f"    {meta}",
-        '    <div class="actions">',
-        f'      <a class="btn primary" href="{html.escape(source_url, quote=True)}" target="_blank" rel="noopener">View on Blackstone</a>',
-        "    </div>",
+        actions,
         body,
         "  </article>",
         "</body>",
@@ -672,6 +684,56 @@ def local_render_version(index_path):
     return int(m.group(1)) if m else 0
 
 
+def _slug_from_link(link):
+    parts = [p for p in urlparse(link or "").path.split("/") if p]
+    if "item" in parts:
+        idx = parts.index("item")
+        if len(parts) > idx + 2 and parts[idx + 1] == FEED_NAME:
+            return parts[idx + 2]
+    return None
+
+
+def _human_from_rfc822(value):
+    try:
+        return parsedate_to_datetime(value).strftime("%B %d, %Y")
+    except Exception:
+        return ""
+
+
+def ensure_local_pages(item_root, items):
+    """Guarantee every feed item has a local reader page on disk.
+
+    Local item pages live only inside the deployed Pages artifact (not committed),
+    so a run that keeps an existing feed without re-rendering pages (e.g. REST
+    discovery was blocked) could ship a feed whose local links 404. Rebuild any
+    missing page directly from the feed's content:encoded HTML so links always work.
+    """
+    healed = 0
+    for it in items:
+        link = it.get("link") or ""
+        slug = it.get("slug") or _slug_from_link(link)
+        if not slug:
+            continue
+        idx_path = item_root / slug / "index.html"
+        if idx_path.exists():
+            continue
+        content_html = it.get("content_html") or it.get("feed_html") or ""
+        if not content_html.strip():
+            continue
+        title = it.get("title") or slug
+        source_url = it.get("source_url") or ""
+        date_human = it.get("date_human") or _human_from_rfc822(it.get("pub_date") or "")
+        idx_path.parent.mkdir(parents=True, exist_ok=True)
+        idx_path.write_text(
+            build_local_page(title, source_url, content_html, date_human),
+            encoding="utf-8",
+        )
+        healed += 1
+    if healed:
+        print(f"INFO: self-healed {healed} missing local {FEED_NAME} page(s)")
+    return healed
+
+
 # --------------------------------------------------------------------------- #
 # Feed assembly
 # --------------------------------------------------------------------------- #
@@ -689,7 +751,8 @@ def build_feed(site_dir, public_base):
     article_urls, posts_by_url = discover_articles(session)
     if not article_urls:
         if output_path.exists():
-            print("no article URLs discovered; kept existing feed and pages")
+            ensure_local_pages(item_root, existing_items)
+            print("no article URLs discovered; kept existing feed and self-healed local pages")
             return
         raise RuntimeError("could not discover any Blackstone Insights article URLs")
     print(f"INFO: {len(article_urls)} candidate articles")
@@ -735,9 +798,12 @@ def build_feed(site_dir, public_base):
                 "title": res["title"],
                 "link": local_url,
                 "guid": local_url,
+                "slug": slug,
                 "pub_date": to_rfc822(res["date_raw"]),
                 "description": res["summary"] or shorten(res["plain"]),
                 "content_html": res["feed_html"],
+                "source_url": res.get("source_url") or url,
+                "date_human": human_date(res.get("date_raw") or ""),
             })
             processed_count += 1
             continue
@@ -747,9 +813,11 @@ def build_feed(site_dir, public_base):
                 "title": existing.get("title") or url,
                 "link": existing.get("link") or local_url,
                 "guid": existing.get("guid") or local_url,
+                "slug": slug,
                 "pub_date": existing.get("pub_date") or to_rfc822(""),
                 "description": existing.get("description") or "",
                 "content_html": existing.get("content_html") or "",
+                "source_url": url,
             })
         else:
             print(f"WARN: no result and no existing copy for {url}; skipping")
@@ -761,6 +829,10 @@ def build_feed(site_dir, public_base):
             return datetime.now(timezone.utc)
 
     output_items.sort(key=_sort_key, reverse=True)
+
+    # Self-heal: make sure every item we are about to publish has a local page on
+    # disk so the feed's links never 404, even on runs that reused feed entries.
+    ensure_local_pages(item_root, output_items)
 
     for item in output_items:
         rss_item = ET.SubElement(channel, "item")
