@@ -1,0 +1,4 @@
+line1  font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; 
+line2  width:100%; 
+line3  color:#0b57d0; 
+end
