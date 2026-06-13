@@ -34,7 +34,12 @@ if __name__ == "__main__":
                 continue
             item_resp = requests.get(item_link, timeout=30)
             item_resp.raise_for_status()
-            rel = urlparse(item_link).path.lstrip("/")
+            # Map the public item URL back to its on-disk location under site/.
+            # The Pages base URL may include a repo subpath (e.g. /rss-pages);
+            # validate_feeds.py looks for the page at site/item/<feed>/<slug>/index.html,
+            # so strip the base-url prefix here instead of using the full URL path
+            # (which would add an extra rss-pages/ segment and break the self-heal).
+            rel = item_link[len(base_url):].lstrip("/")
             out_dir = site_dir / rel
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "index.html").write_bytes(item_resp.content)
