@@ -131,6 +131,9 @@ jobs:
           SCHEME=https
           BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
           python scripts/add_source_links.py site "$BASE_URL"
+          # BlackRock-only: cap oversized charts via injected CSS and rehost remote
+          # images onto our Pages domain so Readwise Reader can fetch them.
+          python scripts/fix_blackrock_pages.py site "$BASE_URL"
 
       - name: Add index page
         run: |
