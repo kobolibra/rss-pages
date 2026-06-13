@@ -125,6 +125,13 @@ jobs:
             python scripts/build_blackstone_insights_feed.py site "$BASE_URL" \
             || echo "[blackstone] build failed; deploying without it (production feeds unaffected)"
 
+      - name: Ensure original-source link on local item pages
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          python scripts/add_source_links.py site "$BASE_URL"
+
       - name: Add index page
         run: |
           cat > site/index.html <<'EOF'
