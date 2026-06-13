@@ -1,4 +1,1 @@
-A=[ font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; ]
-B=[ max-width:100%; height:auto; display:block; margin:18px 0; ]
-C=[ color:#0b57d0; text-decoration:none; ]
-END
+A= font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; |B= width:100%; |C= color:#0b57d0; |END
