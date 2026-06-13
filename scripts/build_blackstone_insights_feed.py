@@ -11,7 +11,10 @@ But the site exposes a clean WordPress REST API for the `insight` post type:
     https://www.blackstone.com/wp-json/wp/v2/insight/<id>
 
 `content.rendered` there is the COMPLETE article body (headings, paragraphs,
-lists, tables, footnotes, disclosures). That is our source of truth for TEXT.
+lists, tables, footnotes, disclosures) -- BUT ONLY when the post object is
+fetched WITHOUT a `_fields` filter. Narrowing the response with `_fields=content`
+returns an EMPTY content.rendered for this post type, so we fetch each article's
+full object individually for its body (see fetch_full_content).
 
 Charts are drawn client-side (Highcharts SVG) and are NOT present in
 content.rendered (only empty mount points), so no text source can capture them.
@@ -85,7 +88,7 @@ HEADERS = {
 ARTICLE_RE = re.compile(r"https://www\.blackstone\.com/insights/article/[a-z0-9\-]+/", re.I)
 
 # Bump when rendering changes so published pages regenerate on the next run.
-RENDER_VERSION = 4
+RENDER_VERSION = 5
 
 INLINE_OK = {"strong", "em", "b", "i", "u", "a", "br", "sup", "sub", "code"}
 BLOCK_OK = {
@@ -361,7 +364,11 @@ def fetch_json(url, session):
 
 
 def fetch_insight_posts(session):
-    fields = "id,link,date,date_gmt,modified_gmt,title,excerpt,content"
+    # IMPORTANT: do NOT request `content` through _fields here. For the `insight`
+    # post type the REST API returns an EMPTY content.rendered whenever the
+    # response is narrowed with _fields. Discovery therefore stays metadata-only
+    # and each article's body is fetched separately via fetch_full_content().
+    fields = "id,link,date,date_gmt,modified_gmt,title,excerpt"
     url = f"{REST_BASE}?per_page={MAX_ITEMS}&orderby=date&order=desc&_fields={fields}"
     data = fetch_json(url, session)
     if isinstance(data, list):
@@ -369,6 +376,25 @@ def fetch_insight_posts(session):
         return data
     print("WARN: REST insight list unavailable or not a list")
     return []
+
+
+def fetch_full_content(post_id, session=None):
+    """Fetch one insight's FULL object (NO _fields) to get content.rendered.
+
+    Blackstone's `insight` endpoint returns an empty content.rendered when the
+    response is narrowed with _fields, but the complete article body (headings,
+    paragraphs, tables, and footnote/disclosure text) is present when the full
+    object is requested. So we fetch each article individually here.
+    """
+    if not post_id:
+        return ""
+    if session is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+    data = fetch_json(f"{REST_BASE}/{post_id}", session)
+    if isinstance(data, dict):
+        return (data.get("content") or {}).get("rendered", "") or ""
+    return ""
 
 
 def discover_articles(session):
@@ -497,12 +523,18 @@ def process_jobs(jobs):
             chart_maps = asyncio.run(_capture_charts(jobs))
         except Exception as exc:
             print(f"WARN: browser charts unavailable ({exc}); shipping text-only")
+    session = requests.Session()
+    session.headers.update(HEADERS)
     results = {}
     for job in jobs:
         url, post = job["url"], job["post"]
         out_dir, local_url = job["out_dir"], job["local_url"]
         title = normalize_space(strip_tags((post.get("title") or {}).get("rendered", ""))) or "Untitled"
         content_html = (post.get("content") or {}).get("rendered", "") or ""
+        if not content_html.strip():
+            # The discovery list omits content (REST returns it empty under
+            # _fields), so fetch the article's full object for its real body.
+            content_html = fetch_full_content(post.get("id"), session)
         cmap = chart_maps.get(url, {})
         clean = clean_rest_content(content_html, url, title)
         if not clean.strip() and not cmap:
