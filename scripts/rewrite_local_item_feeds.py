@@ -46,15 +46,15 @@ def build_blackrock_slug(title: str, pub_date: str, fallback_link: str = "") -> 
 
 
 def build_page(title: str, body_html: str, source_link: str) -> str:
-    # 不在本地 item 页里放外站超链接，尽量避免阅读器继续回源抓正文
+    # 在本地 item 页正文最前面给出文章原文链接
     source_html = (
-        f'<p>来源：{html.escape(source_link)}</p>'
+        f'<p>原文链接：<a href="{html.escape(source_link)}" target="_blank" rel="noopener">{html.escape(source_link)}</a></p>'
         if source_link
         else ""
     )
     return f"""<!doctype html>
 <html>
-<meta charset=\"utf-8\">
+<meta charset="utf-8">
 <head>
   <title>{html.escape(title)}</title>
 </head>
@@ -68,7 +68,7 @@ def build_page(title: str, body_html: str, source_link: str) -> str:
 
 
 def qname_local(tag: str) -> str:
-    return f"{{{CONTENT_NS}}}{tag}"
+    return f"{CONTENT_NS}{tag}"
 
 
 def html_to_text(value: str) -> str:

@@ -112,11 +112,11 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
 def build_item_page(title: str, content_html: str) -> str:
     return f"""<!doctype html>
 <html>
-<meta charset=\"utf-8\">
+<meta charset="utf-8">
 <head><title>{html.escape(title)}</title></head>
 <body>
   <h1>{html.escape(title)}</h1>
-  <p>来源：{html.escape(URL)}</p>
+  <p>原文链接：<a href="{html.escape(URL)}" target="_blank" rel="noopener">{html.escape(URL)}</a></p>
   <div>{content_html}</div>
 </body>
 </html>
