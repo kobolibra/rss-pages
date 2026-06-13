@@ -9,7 +9,7 @@ import feedparser
 import requests
 
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
-CONTENT = f"{{{CONTENT_NS}}}encoded"
+CONTENT = "{" + CONTENT_NS + "}encoded"
 
 
 def normalize(value: str) -> str:
@@ -49,7 +49,9 @@ def restore_live_feed(base_url: str, site_dir: Path, feed_name: str, xml_bytes: 
             continue
         item_resp = requests.get(item_link, timeout=30)
         item_resp.raise_for_status()
-        rel = urlparse(item_link).path.lstrip("/")
+        # Strip the Pages base-url prefix (which may include /rss-pages) so the page
+        # lands at site/item/<feed>/<slug>/index.html to match validate_feeds.py.
+        rel = item_link[len(base_url):].lstrip("/")
         out_dir = site_dir / rel
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "index.html").write_bytes(item_resp.content)
