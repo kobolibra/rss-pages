@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """DB Research PRO builder: reconstruct PDF content as a native web page.
 
-v2 extraction overhaul (a genuine step up from build_dbresearch_lab_feed.py,
-which shared the same naive engine):
-  * Caption-anchored chart cropping. We locate every "Figure N" caption, pick
-    the column it sits in (left/right/full), crop the region from just below
-    the caption down to the next caption/heading, and -- only if that region
-    actually contains vector drawings or images -- render it as ONE crisp
-    inline chart image. The caption itself stays as selectable text. This is
-    what makes charts appear faithfully on the page instead of as axis-label
-    soup (and is NOT a full-page screenshot).
-  * Real-table guard. find_tables() output is only accepted when it looks like
-    a genuine data table (>=2 rows/cols, no cell crammed with many numbers or
-    very long text). Chart gridlines / axis ticks no longer become garbled
-    HTML tables.
-  * Proper boilerplate + disclaimer removal. Repeated running headers/footers
-    are dropped dynamically; the legal back-matter is cut at the
-    "Appendix 1 / Disclosures" heading or known DB disclaimer wording.
+v3 extraction:
+  * Author/sidebar de-interleaving. The cover's right-hand "Authors" column is
+    pulled out of the spatial flow and rendered as a single byline block at the
+    very top, so author names/titles no longer scramble into body paragraphs.
+  * Source-anchored chart cropping. For each "Figure N" caption we crop from
+    just below the caption down to that figure's own "Source :" line (inclusive)
+    -- not down to the next caption -- so the body text that follows a chart is
+    extracted as real text instead of being baked into the image.
+  * Content-driven figure bounding box. The crop's horizontal extent is the
+    real bounding box of the chart's vector drawings + its axis/legend text
+    (clamped to the page), fixing charts whose right edge used to be clipped.
+  * Real-table guard + dynamic boilerplate/disclaimer removal (cut at the
+    "Appendix 1 / Disclosures" heading or known DB disclaimer wording).
 
 Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
 link) -> headless-browser capture, lazily running `playwright install chromium`
@@ -85,9 +82,11 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 2
+RENDER_VERSION = 3
 
 FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
+SOURCE_RE = re.compile(r"^\s*source\b", re.I)
+AUTHOR_TITLE_HINTS = ("analyst", "strategist", "economist", "research", "specialist", "officer", "head of")
 
 DISCLAIMER_HEADINGS = {
     "appendix 1",
@@ -373,14 +372,27 @@ def _detect_boilerplate(doc, total, sizes_out):
     return {t for t, c in margin_counts.items() if c >= thresh and len(t) < 120}
 
 
-def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PAGES):
-    """Return (elements, plain_paragraphs). Charts are cropped to inline images."""
+def _pair_authors(lines):
+    paired = []
+    for ln in lines:
+        low = ln.lower()
+        if paired and any(k in low for k in AUTHOR_TITLE_HINTS) and len(ln) < 40:
+            paired[-1] = f"{paired[-1]} \u2014 {ln}"
+        else:
+            paired.append(ln)
+    return paired
+
+
+def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pages: int = MAX_PAGES):
+    """Return (elements, plain). Authors -> front byline; charts -> inline images."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elements = []
     plain = []
+    author_lines = []
     seen_block = set()
     fig_n = 0
     disclaimer_hit = False
+    title_low = (title or "").strip().lower()
     bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
     try:
         total = min(len(doc), max_pages)
@@ -410,9 +422,6 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
             R = page.rect
             H, Wp = R.height, R.width
             mid_x = (R.x0 + R.x1) / 2
-            content_left = R.x0 + 0.04 * Wp
-            content_right = R.x1 - 0.04 * Wp
-
             blocks = [b for b in page.get_text("dict").get("blocks", []) if b.get("type") == 0]
             infos = [block_info(b) for b in blocks]
 
@@ -436,28 +445,10 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
                 pass
             graphics = draw_rects + img_rects
 
-            cap_idx = []
-            head_spans = []  # (x0, x1, y0) of heading-like blocks (column boundaries)
-            for i, (lt, text, big, bold, bbox) in enumerate(infos):
-                if not text:
-                    continue
-                if FIG_CAP_RE.match(text):
-                    cap_idx.append(i)
-                elif big >= 1.18 * median and len(text) < 80:
-                    head_spans.append((bbox.x0, bbox.x1, bbox.y0))
-            cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
-
             def column_of(bbox):
                 if bbox.width / Wp > 0.6:
                     return "full"
                 return "left" if (bbox.x0 + bbox.x1) / 2 < mid_x else "right"
-
-            def col_xrange(col):
-                if col == "left":
-                    return content_left, mid_x - 0.01 * Wp
-                if col == "right":
-                    return mid_x + 0.01 * Wp, content_right
-                return content_left, content_right
 
             def in_col(x0, x1, col):
                 if col == "full":
@@ -465,39 +456,93 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
                 cx = (x0 + x1) / 2
                 return cx < mid_x if col == "left" else cx >= mid_x
 
-            fig_items = []  # (caption_bbox, image_name_or_None, caption_text)
+            # ---- author / sidebar capture (cover page) ----
+            author_idxs = set()
+            auth_i = next((i for i, inf in enumerate(infos)
+                           if normalize_space(inf[1]).lower() in ("authors", "author")), None)
+            if auth_i is not None:
+                abbox = infos[auth_i][4]
+                acol = column_of(abbox)
+                if acol != "full":
+                    page_authors = []
+                    for i, (lt, text, big, bold, bbox) in enumerate(infos):
+                        if bbox.y0 >= abbox.y0 - 2 and in_col(bbox.x0, bbox.x1, acol) and len(text) < 80:
+                            author_idxs.add(i)
+                            if i != auth_i:
+                                for ln in lt:
+                                    if not is_junk_line(ln):
+                                        page_authors.append((bbox.y0, normalize_space(ln)))
+                    page_authors.sort(key=lambda e: e[0])
+                    author_lines.extend(t for _, t in page_authors if t)
+
+            # ---- caption detection ----
+            cap_idx = []
+            head_spans = []
+            for i, (lt, text, big, bold, bbox) in enumerate(infos):
+                if not text or i in author_idxs:
+                    continue
+                if FIG_CAP_RE.match(text):
+                    cap_idx.append(i)
+                elif big >= 1.18 * median and len(text) < 80:
+                    head_spans.append((bbox.x0, bbox.x1, bbox.y0))
+            cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
+
+            # ---- per-figure cropping (source-anchored, content-driven bbox) ----
+            fig_items = []
             fig_rects = []
             for i in cap_idx:
-                lt, text, big, bold, bbox = infos[i]
-                col = column_of(bbox)
-                x0r, x1r = col_xrange(col)
-                cands = []
-                for (bx0, bx1, by0) in cap_spans + head_spans:
-                    if by0 > bbox.y1 + 2 and in_col(bx0, bx1, col):
-                        cands.append(by0)
-                y_bottom = min(cands) if cands else (R.y1 - 0.06 * H)
-                y_bottom = min(y_bottom, bbox.y1 + 0.55 * H)
-                crop = fitz.Rect(x0r, bbox.y1 + 1, x1r, y_bottom - 1) & R
-                if crop.is_empty or crop.height < 40 or crop.width < 60:
-                    fig_items.append((bbox, None, text))
+                lt, text, big, bold, cbbox = infos[i]
+                col = column_of(cbbox)
+                cands = [by0 for (bx0, bx1, by0) in (cap_spans + head_spans)
+                         if by0 > cbbox.y1 + 2 and in_col(bx0, bx1, col)]
+                y_limit = min(cands) if cands else (R.y1 - 0.06 * H)
+                y_limit = min(y_limit, cbbox.y1 + 0.55 * H)
+                gset = [g for g in graphics
+                        if g.height > 8 and g.width > 8
+                        and g.y1 > cbbox.y0 and g.y0 < y_limit
+                        and in_col(g.x0, g.x1, col)]
+                if not gset:
+                    fig_items.append((cbbox, None, text))
                     continue
-                has_graphics = any(
-                    crop.intersects(g) and not (crop & g).is_empty and _area(crop & g) > 0.03 * _area(crop)
-                    for g in graphics
-                )
-                if not has_graphics:
-                    fig_items.append((bbox, None, text))
+                gx0 = min(g.x0 for g in gset)
+                gx1 = max(g.x1 for g in gset)
+                gy1 = max(g.y1 for g in gset)
+                # this figure's own Source line -> crop bottom (inclusive)
+                src_y = None
+                for j, (lt2, text2, big2, bold2, bbox2) in enumerate(infos):
+                    if j in author_idxs or not text2:
+                        continue
+                    if (bbox2.y0 >= cbbox.y1 and bbox2.y0 < y_limit
+                            and in_col(bbox2.x0, bbox2.x1, col) and SOURCE_RE.match(text2)):
+                        src_y = bbox2.y1 if src_y is None else max(src_y, bbox2.y1)
+                bottom = (src_y if src_y is not None else gy1) + 3
+                bottom = min(bottom, y_limit - 1)
+                top = cbbox.y1 + 1
+                # widen x to include axis/legend text that sits inside the band
+                for (lt2, text2, big2, bold2, bbox2) in infos:
+                    if (bbox2.y0 >= top - 2 and bbox2.y1 <= bottom + 2
+                            and in_col(bbox2.x0, bbox2.x1, col)
+                            and not SOURCE_RE.match(text2) and not FIG_CAP_RE.match(text2)
+                            and len(text2) < 60):
+                        gx0 = min(gx0, bbox2.x0)
+                        gx1 = max(gx1, bbox2.x1)
+                x0c = min(gx0, cbbox.x0) - 3
+                x1c = max(gx1, cbbox.x1) + 5
+                crop = fitz.Rect(x0c, top, x1c, bottom) & R
+                if crop.is_empty or crop.height < 30 or crop.width < 60:
+                    fig_items.append((cbbox, None, text))
                     continue
                 try:
                     fig_n += 1
                     pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=crop, alpha=False)
                     name = f"fig-{fig_n:03d}.png"
                     (out_dir / name).write_bytes(pix.tobytes("png"))
-                    fig_items.append((bbox, name, text))
+                    fig_items.append((cbbox, name, text))
                     fig_rects.append(crop)
                 except Exception:
-                    fig_items.append((bbox, None, text))
+                    fig_items.append((cbbox, None, text))
 
+            # ---- real tables (skip chart-axis soup and figure overlaps) ----
             table_items, table_rects = [], []
             try:
                 for t in page.find_tables().tables:
@@ -513,9 +558,10 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
             except Exception:
                 pass
 
+            # ---- body text ----
             positioned = []
-            for (lt, text, big, bold, bbox) in infos:
-                if not text or FIG_CAP_RE.match(text):
+            for idx, (lt, text, big, bold, bbox) in enumerate(infos):
+                if not text or idx in author_idxs or FIG_CAP_RE.match(text):
                     continue
                 if any(_covers(fr, bbox) for fr in fig_rects):
                     continue
@@ -534,6 +580,8 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
                     break
                 if "important research disclosures located in appendix" in low:
                     continue
+                if title_low and title_low in low and len(btext) < len(title_low) + 40:
+                    continue
                 if len(btext) < 80 and low in seen_block:
                     continue
                 if len(btext) < 80:
@@ -551,11 +599,11 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
 
             for rr, th in table_items:
                 positioned.append((rr.y0, rr.x0, ("table", th)))
-            for bbox, name, cap_text in fig_items:
+            for cbbox, name, cap_text in fig_items:
                 if name:
-                    positioned.append((bbox.y0, bbox.x0, ("figure", name, cap_text)))
+                    positioned.append((cbbox.y0, cbbox.x0, ("figure", name, cap_text)))
                 else:
-                    positioned.append((bbox.y0, bbox.x0, ("h3", cap_text)))
+                    positioned.append((cbbox.y0, cbbox.x0, ("h3", cap_text)))
 
             positioned.sort(key=lambda e: (round(e[0], 1), e[1]))
             for _, _, el in positioned:
@@ -566,6 +614,10 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
                     plain.extend(x for x in el[1] if len(x) >= 24)
     finally:
         doc.close()
+
+    if author_lines:
+        byline = _pair_authors(author_lines)
+        elements = [("h3", "Authors"), ("ul", byline)] + elements
     return elements, plain
 
 
@@ -603,6 +655,7 @@ PAGE_CSS = """
   h3 { font-size: 1.1em; margin: 1.2em 0 0.4em; }
   p { margin: 0.7em 0; }
   ul { margin: 0.6em 0 0.6em 1.2em; }
+  .byline { color: #444; font-size: 0.95em; }
   figure { margin: 1.2em 0; text-align: center; }
   figure img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; }
   figcaption { font-size: 0.9em; color: #444; margin-top: 6px; font-style: italic; }
@@ -883,7 +936,7 @@ def build_feed(site_dir: Path, public_base: str):
                     except Exception:
                         pass
                 try:
-                    elements, plain = extract_pdf_content(pdf_bytes, out_dir)
+                    elements, plain = extract_pdf_content(pdf_bytes, out_dir, title=title)
                 except Exception as exc:
                     print(f"WARN: extraction failed for {link}: {exc}")
 
