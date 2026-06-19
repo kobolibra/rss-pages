@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-"""DB Research PRO builder: high-fidelity PDF -> reader-friendly web page.
+"""DB Research PRO builder: reconstruct PDF content as a native web page.
 
-Next level vs build_dbresearch_feed.py (production) and
-build_dbresearch_lab_feed.py (experimental):
+Goal: make each PDF's USEFUL content (text, charts, tables, structure) appear
+on a clean web page "as if the PDF content lived on the page" -- NOT by pasting
+a full-page screenshot of every page (that is what the production dbresearch
+feed does). We reflow real selectable text, crop just the chart/figure regions
+as inline images, rebuild tables as real HTML <table>, and aggressively strip
+boilerplate (running headers/footers, page numbers, the DB contact line,
+template artifacts, and the legal disclaimer block).
 
-  * Robust PDF fetching: direct binary -> viewer-page scrape (var pdfUrl /
-    canonical link) -> headless-browser capture. The browser step lazily runs
-    `playwright install chromium` if the binary is missing, so it works even
-    when the CI step order changes (this is exactly why the old lab feed never
-    bootstrapped).
-  * Maximal, layout-preserving extraction:
-      - per-page high-resolution images (faithful original format / layout)
-      - cropped inline figures / charts (so charts survive a reader extractor)
-      - real HTML <table> elements
-      - semantic headings / paragraphs / lists (selectable, highlightable)
-  * Aggressive, *dynamic* boilerplate removal: repeated running headers/footers
-    are detected across pages (margin zones), plus page numbers, the DB contact
-    header line, template artifacts, and the legal disclaimer block are dropped.
-    This fixes the main quality problem in the production feed (axis-label soup
-    + repeated headers + the entire disclaimer dumped into the body).
-  * Reader-optimized: clean semantic HTML is mirrored into <content:encoded>
-    with ABSOLUTE image URLs, so Readwise Reader renders the full article
-    (text + charts + tables + original pages) without depending on its own
-    page parser.
-  * Processes at most MAX_PDFS_PER_RUN (=5) *new* PDFs per run; already-built
-    items are reused from the published feed (incremental, render-versioned).
-    Deferred items stay in the feed pointing at the original PDF and get built
-    on a later run.
-  * Self-bootstrapping: works on the very first run with no live feed yet.
+Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
+link) -> headless-browser capture, lazily running `playwright install chromium`
+if the browser binary is missing (this is why the old lab feed never
+bootstrapped).
+
+Limits:
+  * First run (no live feed yet): at most FIRST_RUN_MAX_ITEMS (=10) articles,
+    of which at most MAX_PDFS_PER_RUN (=5) are localized PDFs.
+  * Every run: localize at most MAX_PDFS_PER_RUN (=5) NEW PDFs; already-built
+    items are reused from the published feed and never reprocessed.
+  * PDFs beyond the per-run budget are deferred (kept in the feed pointing at
+    the original PDF) and built on a later run.
+
+Reader-optimized: clean semantic HTML is mirrored into <content:encoded> with
+ABSOLUTE image URLs so Readwise Reader renders the full article directly.
 
 Writes dbresearch_pro.xml + item/dbresearch_pro/<slug>/.
 Usage: python build_dbresearch_pro_feed.py <site_dir> <public_base>
@@ -65,14 +61,15 @@ SOURCE_FEED_URL = os.environ.get(
 )
 FEED_NAME = os.environ.get("DBRESEARCH_PRO_FEED_NAME", "dbresearch_pro")
 OUTPUT_FILE = os.environ.get("DBRESEARCH_PRO_OUTPUT_FILE", f"{FEED_NAME}.xml")
-# How many items to keep in the feed (bounds total stored assets).
-MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_MAX_ITEMS", "15"))
+# Feed retention (how many items to keep / how many source entries to scan).
+MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_MAX_ITEMS", "40"))
+# Bootstrap cap: on the very first run (no live feed), keep at most this many.
+FIRST_RUN_MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS", "10"))
 # Hard cap on NEW PDFs fetched+rendered per run.
 MAX_PDFS_PER_RUN = int(os.environ.get("DBRESEARCH_PRO_MAX_PDFS", "5"))
-MAX_PAGES = int(os.environ.get("DBRESEARCH_PRO_MAX_PAGES", "40"))
+MAX_PAGES = int(os.environ.get("DBRESEARCH_PRO_MAX_PAGES", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_PRO_TIMEOUT", "60"))
-# Faithful full-page render scale and cropped-figure scale.
-PAGE_SCALE = float(os.environ.get("DBRESEARCH_PRO_PAGE_SCALE", "1.6"))
+# Cropped-figure render scale (charts/diagrams shown inline, in context).
 FIG_SCALE = float(os.environ.get("DBRESEARCH_PRO_FIG_SCALE", "2.0"))
 USER_AGENT = os.environ.get(
     "DBRESEARCH_PRO_USER_AGENT",
@@ -337,7 +334,7 @@ def fetch_pdf_bytes(url: str) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# Structured extraction (semantic text + tables + figures + faithful pages)
+# Structured extraction (semantic text + tables + cropped figures)
 # --------------------------------------------------------------------------- #
 def _table_to_html(table) -> str:
     try:
@@ -388,11 +385,10 @@ def _detect_boilerplate(doc, total, sizes_out):
 
 
 def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PAGES):
-    """Return (elements, plain_paragraphs, page_image_names)."""
+    """Return (elements, plain_paragraphs). No full-page screenshots."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elements = []
     plain = []
-    page_images = []
     seen_block = set()
     fig_n = 0
     disclaimer_hit = False
@@ -407,15 +403,6 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
             if disclaimer_hit:
                 break
             page = doc.load_page(pi)
-
-            # Faithful full-page image (preserves original layout/format).
-            try:
-                pm = page.get_pixmap(matrix=fitz.Matrix(PAGE_SCALE, PAGE_SCALE), alpha=False)
-                pname = f"page-{pi + 1:03d}.png"
-                (out_dir / pname).write_bytes(pm.tobytes("png"))
-                page_images.append(pname)
-            except Exception:
-                pass
 
             table_items, table_rects = [], []
             try:
@@ -498,7 +485,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PA
                     plain.extend(x for x in el[1] if len(x) >= 24)
     finally:
         doc.close()
-    return elements, plain, page_images
+    return elements, plain
 
 
 # --------------------------------------------------------------------------- #
@@ -527,19 +514,9 @@ def render_elements(elements: list, img_prefix: str = "") -> str:
     return "\n".join(parts)
 
 
-def render_pages_html(page_images: list, img_prefix: str = "") -> str:
-    if not page_images:
-        return ""
-    parts = ['<h2 class="orig-title">\u539f\u59cb\u9875\u9762 / Original layout</h2>']
-    for name in page_images:
-        src = html.escape(img_prefix + name)
-        parts.append(f'<figure class="pagefig"><img src="{src}" alt="page" loading="lazy"></figure>')
-    return "\n".join(parts)
-
-
 PAGE_CSS = """
   body { font-family: Georgia, "Times New Roman", serif; margin: 0; color: #1a1a1a; background: #fff; }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 28px 18px 72px; line-height: 1.7; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 28px 18px 72px; line-height: 1.7; }
   h1 { font-size: 1.7em; line-height: 1.25; margin: 0 0 14px; }
   h2 { font-size: 1.3em; margin: 1.5em 0 0.5em; }
   h3 { font-size: 1.1em; margin: 1.2em 0 0.4em; }
@@ -547,21 +524,18 @@ PAGE_CSS = """
   ul { margin: 0.6em 0 0.6em 1.2em; }
   figure { margin: 1.2em 0; text-align: center; }
   figure img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; }
-  figure.pagefig img { border: 1px solid #ddd; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
   figcaption { font-size: 0.85em; color: #666; margin-top: 6px; }
   .tablewrap { overflow-x: auto; margin: 1.1em 0; }
   table { border-collapse: collapse; width: 100%; font-size: 0.92em; }
   th, td { border: 1px solid #ddd; padding: 6px 9px; text-align: left; vertical-align: top; }
   thead th { background: #f5f5f5; }
-  .orig-title { font-size: 1.0em; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2em; }
   .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 24px; font-family: -apple-system, sans-serif; }
   .btn { display: inline-block; padding: 8px 13px; border-radius: 8px; text-decoration: none; border: 1px solid #ccc; color: #111; background: #fff; font-size: 0.9em; }
   .btn.primary { background: #111; color: #fff; border-color: #111; }
-  hr { border: none; border-top: 1px solid #eee; margin: 2.2em 0; }
 """
 
 
-def build_local_page(title: str, source_link: str, pdf_href, reader_html: str, pages_html: str) -> str:
+def build_local_page(title: str, source_link: str, pdf_href, reader_html: str) -> str:
     open_href = html.escape(pdf_href or source_link)
     body = reader_html or "<p>Content could not be extracted from this PDF.</p>"
     lines = [
@@ -584,13 +558,10 @@ def build_local_page(title: str, source_link: str, pdf_href, reader_html: str, p
         '    <section class="reader-content">',
         body,
         "    </section>",
+        "  </article>",
+        "</body>",
+        "</html>",
     ]
-    if pages_html:
-        lines.append("    <hr>")
-        lines.append('    <section class="original-pages">')
-        lines.append(pages_html)
-        lines.append("    </section>")
-    lines.extend(["  </article>", "</body>", "</html>"])
     return "\n".join(lines)
 
 
@@ -712,21 +683,27 @@ def build_feed(site_dir: Path, public_base: str):
     existing_guid_map = {it["guid"]: it for it in existing_items if it.get("guid")}
     existing_slug_map = {it["slug"]: it for it in existing_items if it.get("slug")}
 
+    is_bootstrap = len(existing_items) == 0
+    item_budget = FIRST_RUN_MAX_ITEMS if is_bootstrap else MAX_ITEMS
+
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = (parsed.feed.get("title") or "DB Research") + " (pro)"
     ET.SubElement(channel, "link").text = f"{public_base}/{OUTPUT_FILE}" if public_base else SOURCE_FEED_URL
-    ET.SubElement(channel, "description").text = "High-fidelity DB Research feed: layout-preserving reader pages with inline charts, tables and original pages"
+    ET.SubElement(channel, "description").text = "High-fidelity DB Research feed: PDF text, charts and tables rebuilt as native reader pages"
     ET.SubElement(channel, "language").text = parsed.feed.get("language") or "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
     ET.SubElement(channel, "generator").text = "DBResearch pro high-fidelity builder"
 
     output_items = []
-    total_count = 0
     processed_pdfs = 0
     pdf_count = 0
+    new_or_built = 0
 
-    for entry in parsed.entries[:MAX_ITEMS]:
+    for entry in parsed.entries:
+        if len(output_items) >= item_budget:
+            break
+
         title = normalize_space(entry.get("title", "Untitled")) or "Untitled"
         link = entry.get("link", "").strip()
         description = normalize_space(entry.get("summary", "") or entry.get("description", ""))
@@ -764,7 +741,6 @@ def build_feed(site_dir: Path, public_base: str):
                 "content_html": existing_item.get("content_html") or "",
                 "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
             })
-            total_count += 1
             continue
 
         # Defer new PDFs beyond the per-run budget: keep them in the feed
@@ -780,7 +756,7 @@ def build_feed(site_dir: Path, public_base: str):
                 "content_html": "",
                 "is_permalink": bool(guid == link and link.startswith("http")),
             })
-            total_count += 1
+            new_or_built += 1 if guid not in existing_guid_map else 0
             continue
 
         final_link, final_guid = link, guid
@@ -804,16 +780,15 @@ def build_feed(site_dir: Path, public_base: str):
                 except Exception as exc:
                     print(f"WARN: fetch PDF failed for {link}: {exc}")
 
-            elements, plain, page_images = [], [], []
+            elements, plain = [], []
             if pdf_bytes:
-                for old in (list(out_dir.glob("fig-*.png")) + list(out_dir.glob("page-*.png"))
-                            + list(out_dir.glob("page-*.svg"))):
+                for old in (list(out_dir.glob("fig-*.png")) + list(out_dir.glob("page-*.png"))):
                     try:
                         old.unlink()
                     except Exception:
                         pass
                 try:
-                    elements, plain, page_images = extract_pdf_content(pdf_bytes, out_dir)
+                    elements, plain = extract_pdf_content(pdf_bytes, out_dir)
                 except Exception as exc:
                     print(f"WARN: extraction failed for {link}: {exc}")
 
@@ -822,21 +797,22 @@ def build_feed(site_dir: Path, public_base: str):
 
             reader_body = render_elements(elements, img_prefix="")
             reader_abs = render_elements(elements, img_prefix=local_url)
-            pages_body = render_pages_html(page_images, img_prefix="")
-            pages_abs = render_pages_html(page_images, img_prefix=local_url)
-            content_html = reader_abs + (("\n<hr>\n" + pages_abs) if pages_abs else "")
+            content_html = reader_abs
             (out_dir / "index.html").write_text(
-                build_local_page(title, link, "original.pdf" if pdf_bytes else None, reader_body, pages_body),
+                build_local_page(title, link, "original.pdf" if pdf_bytes else None, reader_body),
                 encoding="utf-8",
             )
             final_link = final_guid = local_url
             is_permalink = True
             processed_pdfs += 1
             pdf_count += 1
+            new_or_built += 1
         elif not description:
             description = shorten(title)
 
-        total_count += 1
+        if guid not in existing_guid_map:
+            new_or_built += 1
+
         output_items.append({
             "title": title,
             "link": final_link,
@@ -859,13 +835,13 @@ def build_feed(site_dir: Path, public_base: str):
         if item.get("content_html"):
             ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
 
-    if processed_pdfs == 0 and output_path.exists():
-        print(f"no new {FEED_NAME} PDFs processed; kept existing feed and pages")
+    if new_or_built == 0 and output_path.exists():
+        print(f"no new {FEED_NAME} items; kept existing feed and pages")
         return
 
     xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
     output_path.write_bytes(xml_bytes)
-    print(f"Saved {output_path} (items={total_count}, pdf_built={pdf_count}, budget={MAX_PDFS_PER_RUN})")
+    print(f"Saved {output_path} (items={len(output_items)}, pdf_built={pdf_count}, budget={MAX_PDFS_PER_RUN}, bootstrap={is_bootstrap})")
 
 
 if __name__ == "__main__":
