@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """DB Research PRO builder: reconstruct PDF content as a native web page.
 
-v3 extraction:
-  * Author/sidebar de-interleaving. The cover's right-hand "Authors" column is
-    pulled out of the spatial flow and rendered as a single byline block at the
-    very top, so author names/titles no longer scramble into body paragraphs.
-  * Source-anchored chart cropping. For each "Figure N" caption we crop from
-    just below the caption down to that figure's own "Source :" line (inclusive)
-    -- not down to the next caption -- so the body text that follows a chart is
-    extracted as real text instead of being baked into the image.
-  * Content-driven figure bounding box. The crop's horizontal extent is the
-    real bounding box of the chart's vector drawings + its axis/legend text
-    (clamped to the page), fixing charts whose right edge used to be clipped.
-  * Real-table guard + dynamic boilerplate/disclaimer removal (cut at the
-    "Appendix 1 / Disclosures" heading or known DB disclaimer wording).
+v4 extraction:
+  * Layout-aware reading order. Each page is classified as a true multi-column
+    layout (independent side-by-side panels, e.g. a country grid) or a
+    single-flow / label+content layout, by testing how many text blocks cross
+    the page midline. Multi-column pages are read column-major (whole left
+    column, then whole right column) within bands delimited by full-width
+    spanning elements; everything else is read row-major (y, then x). This
+    stops the left/right panels of dashboard PDFs from interleaving.
+  * Box-bullet lists. DB's bullet glyph (❑ and friends) is recognized, and a
+    bullet that wraps across several lines is merged into a single list item.
+  * Inline legal/cert noise removal vs. end-matter hard stop. Footer
+    disclaimers, "Analyst Certification" blocks, emails and bare URLs are
+    dropped in place WITHOUT truncating the document; only the dedicated
+    "Appendix 1 / Disclosures" end-matter (or its opening DB disclaimer
+    sentence) stops extraction.
+  * Author/sidebar de-interleaving, source-anchored chart cropping and
+    content-driven figure bounding boxes (from v3) are retained.
+  * Real-table guard keeps genuine data tables and rejects chart-axis soup.
 
 Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
 link) -> headless-browser capture, lazily running `playwright install chromium`
@@ -71,7 +76,6 @@ FIRST_RUN_MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS", "
 MAX_PDFS_PER_RUN = int(os.environ.get("DBRESEARCH_PRO_MAX_PDFS", "5"))
 MAX_PAGES = int(os.environ.get("DBRESEARCH_PRO_MAX_PAGES", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_PRO_TIMEOUT", "60"))
-# Cropped-chart render scale (charts shown inline as faithful images).
 FIG_SCALE = float(os.environ.get("DBRESEARCH_PRO_FIG_SCALE", "2.0"))
 USER_AGENT = os.environ.get(
     "DBRESEARCH_PRO_USER_AGENT",
@@ -82,13 +86,18 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 3
+RENDER_VERSION = 4
 
 FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
 SOURCE_RE = re.compile(r"^\s*source\b", re.I)
+STRONG_BULLET_RE = re.compile(
+    r"^\s*[\u2022\u25aa\u25cf\u25e6\u2043\u2023\u2751\u2752\u274f\u25a1\u25a0\u2756\u2727\u2b1b\u2b1c]\s+"
+)
+WEAK_BULLET_RE = re.compile(r"^\s*(?:[\u2013\u2014\-\*]|\d+[.)])\s+")
 AUTHOR_TITLE_HINTS = ("analyst", "strategist", "economist", "research", "specialist", "officer", "head of")
 
-DISCLAIMER_HEADINGS = {
+# End-matter: hard-stop extraction (everything after this is legal back matter).
+ENDMATTER_HEADINGS = {
     "appendix 1",
     "appendix",
     "appendix 1: important disclosures",
@@ -96,16 +105,21 @@ DISCLAIMER_HEADINGS = {
     "disclaimers",
     "disclosures",
     "important disclosures",
-    "analyst certification",
 }
-DISCLAIMER_MARKERS = (
+ENDMATTER_MARKERS = (
+    "this material has been prepared by the deutsche bank research institute",
     "this material has been prepared by",
-    "this material is provided to you for general information",
-    "important research disclosures located in appendix",
-    "this report is approved and/or distributed",
-    "the information and opinions in this report were prepared",
     "neither deutsche bank ag nor any of its affiliates makes any representation",
-    "deutsche bank does and seeks to do business",
+)
+# Inline legal/cert noise: drop the block but keep going (no truncation).
+LEGAL_NOISE_HEADINGS = {"analyst certification"}
+LEGAL_NOISE_MARKERS = (
+    "the views expressed above accurately reflect",
+    "the views expressed in this report accurately reflect",
+    "for other important disclosures please visit",
+    "incomplete disclosure information may have been displayed",
+    "prices are current as of the end of the previous trading session",
+    "important research disclosures located in appendix",
 )
 
 _CHROMIUM_READY = False
@@ -171,6 +185,10 @@ def is_junk_line(line: str) -> bool:
         return True
     if low.startswith("page ") or re.fullmatch(r"page\s+\d+", low):
         return True
+    if re.fullmatch(r"(?:https?://|www\.)\S+", low):
+        return True
+    if re.search(r"[^@\s]+@[^@\s]+\.[^@\s]+", low) and len(low) < 70:
+        return True
     if "@db.com" in low:
         return True
     if "db blue template" in low:
@@ -184,6 +202,7 @@ def is_junk_line(line: str) -> bool:
     if low in {
         "deutsche bank research institute",
         "deutsche bank ag",
+        "deutsche bank ag/london",
         "sensitivity: public",
         "capital markets blog",
         "source: deutsche bank research",
@@ -340,7 +359,7 @@ def _table_is_real(table) -> bool:
             if len(c) > 80:
                 return False
             numlike = sum(1 for tok in c.split() if re.search(r"\d", tok))
-            if numlike >= 6:
+            if numlike >= 8:
                 return False
     return True
 
@@ -383,8 +402,29 @@ def _pair_authors(lines):
     return paired
 
 
+def _bullet_split(lines):
+    """Group lines into bullet items, merging wrapped continuation lines."""
+    items = []
+    cur = None
+    n_bullets = 0
+    for t in lines:
+        m = STRONG_BULLET_RE.match(t) or WEAK_BULLET_RE.match(t)
+        if m:
+            n_bullets += 1
+            if cur is not None:
+                items.append(cur)
+            cur = t[m.end():].strip()
+        elif cur is None:
+            cur = t.strip()
+        else:
+            cur = f"{cur} {t.strip()}".strip()
+    if cur:
+        items.append(cur)
+    return [it for it in items if it], n_bullets
+
+
 def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pages: int = MAX_PAGES):
-    """Return (elements, plain). Authors -> front byline; charts -> inline images."""
+    """Return (elements, plain). Layout-aware ordering; charts -> inline images."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elements = []
     plain = []
@@ -393,7 +433,6 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
     fig_n = 0
     disclaimer_hit = False
     title_low = (title or "").strip().lower()
-    bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
     try:
         total = min(len(doc), max_pages)
         sizes = []
@@ -456,6 +495,12 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 cx = (x0 + x1) / 2
                 return cx < mid_x if col == "left" else cx >= mid_x
 
+            def is_fw(bbox):
+                return bbox.width > 0.62 * Wp and bbox.x0 < R.x0 + 0.15 * Wp
+
+            def crosses_mid(bbox):
+                return bbox.x0 < mid_x - 0.03 * Wp and bbox.x1 > mid_x + 0.03 * Wp
+
             # ---- author / sidebar capture (cover page) ----
             author_idxs = set()
             auth_i = next((i for i, inf in enumerate(infos)
@@ -488,7 +533,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
             cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
 
             # ---- per-figure cropping (source-anchored, content-driven bbox) ----
-            fig_items = []
+            fig_items = []  # (order_bbox, image_name_or_None, caption_text)
             fig_rects = []
             for i in cap_idx:
                 lt, text, big, bold, cbbox = infos[i]
@@ -507,7 +552,6 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 gx0 = min(g.x0 for g in gset)
                 gx1 = max(g.x1 for g in gset)
                 gy1 = max(g.y1 for g in gset)
-                # this figure's own Source line -> crop bottom (inclusive)
                 src_y = None
                 for j, (lt2, text2, big2, bold2, bbox2) in enumerate(infos):
                     if j in author_idxs or not text2:
@@ -518,7 +562,6 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 bottom = (src_y if src_y is not None else gy1) + 3
                 bottom = min(bottom, y_limit - 1)
                 top = cbbox.y1 + 1
-                # widen x to include axis/legend text that sits inside the band
                 for (lt2, text2, big2, bold2, bbox2) in infos:
                     if (bbox2.y0 >= top - 2 and bbox2.y1 <= bottom + 2
                             and in_col(bbox2.x0, bbox2.x1, col)
@@ -529,6 +572,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 x0c = min(gx0, cbbox.x0) - 3
                 x1c = max(gx1, cbbox.x1) + 5
                 crop = fitz.Rect(x0c, top, x1c, bottom) & R
+                order_bbox = fitz.Rect(crop.x0, cbbox.y0, crop.x1, crop.y1)
                 if crop.is_empty or crop.height < 30 or crop.width < 60:
                     fig_items.append((cbbox, None, text))
                     continue
@@ -537,7 +581,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                     pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=crop, alpha=False)
                     name = f"fig-{fig_n:03d}.png"
                     (out_dir / name).write_bytes(pix.tobytes("png"))
-                    fig_items.append((cbbox, name, text))
+                    fig_items.append((order_bbox, name, text))
                     fig_rects.append(crop)
                 except Exception:
                     fig_items.append((cbbox, None, text))
@@ -559,7 +603,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 pass
 
             # ---- body text ----
-            positioned = []
+            positioned = []  # (bbox, element)
             for idx, (lt, text, big, bold, bbox) in enumerate(infos):
                 if not text or idx in author_idxs or FIG_CAP_RE.match(text):
                     continue
@@ -573,12 +617,14 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                 btext = normalize_space(" ".join(kept))
                 low = btext.lower()
                 heading_like = (big >= 1.18 * median or bold) and len(btext) < 60
-                if (heading_like and low in DISCLAIMER_HEADINGS) or (
-                    len(btext) > 120 and any(m in low for m in DISCLAIMER_MARKERS)
+                if (heading_like and low in ENDMATTER_HEADINGS) or (
+                    len(btext) > 80 and any(m in low for m in ENDMATTER_MARKERS)
                 ):
                     disclaimer_hit = True
                     break
-                if "important research disclosures located in appendix" in low:
+                if heading_like and low in LEGAL_NOISE_HEADINGS:
+                    continue
+                if any(m in low for m in LEGAL_NOISE_MARKERS):
                     continue
                 if title_low and title_low in low and len(btext) < len(title_low) + 40:
                     continue
@@ -586,27 +632,47 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                     continue
                 if len(btext) < 80:
                     seen_block.add(low)
-                y0, x0 = bbox.y0, bbox.x0
-                if big >= 1.45 * median and len(btext) < 200:
-                    positioned.append((y0, x0, ("h2", btext)))
+                list_items, n_bullets = _bullet_split(kept)
+                strong0 = bool(STRONG_BULLET_RE.match(kept[0]))
+                if n_bullets >= 1 and (strong0 or n_bullets >= 2):
+                    el = ("ul", list_items)
+                elif big >= 1.45 * median and len(btext) < 200:
+                    el = ("h2", btext)
                 elif (big >= 1.18 * median or bold) and len(btext) < 160:
-                    positioned.append((y0, x0, ("h3", btext)))
-                elif len(kept) >= 2 and all(bullet.match(t) for t in kept):
-                    items = [bullet.sub("", t).strip() for t in kept]
-                    positioned.append((y0, x0, ("ul", items)))
+                    el = ("h3", btext)
                 else:
-                    positioned.append((y0, x0, ("p", btext)))
+                    el = ("p", btext)
+                positioned.append((bbox, el))
 
             for rr, th in table_items:
-                positioned.append((rr.y0, rr.x0, ("table", th)))
-            for cbbox, name, cap_text in fig_items:
-                if name:
-                    positioned.append((cbbox.y0, cbbox.x0, ("figure", name, cap_text)))
-                else:
-                    positioned.append((cbbox.y0, cbbox.x0, ("h3", cap_text)))
+                positioned.append((rr, ("table", th)))
+            for ob, name, cap_text in fig_items:
+                positioned.append((ob, ("figure", name, cap_text) if name else ("h3", cap_text)))
 
-            positioned.sort(key=lambda e: (round(e[0], 1), e[1]))
-            for _, _, el in positioned:
+            # ---- layout-aware ordering ----
+            nonfw = [b for b, _ in positioned if not is_fw(b)]
+            n_cross = sum(1 for b in nonfw if crosses_mid(b))
+            two_col = len(nonfw) >= 4 and n_cross <= 0.25 * len(nonfw)
+            if two_col:
+                divs = sorted(b.y0 for b, _ in positioned if is_fw(b))
+
+                def band_of(y):
+                    return sum(1 for d in divs if d <= y + 1)
+
+                def order_key(item):
+                    b, _el = item
+                    if is_fw(b):
+                        col = -1
+                    else:
+                        col = 0 if (b.x0 + b.x1) / 2 < mid_x else 1
+                    return (band_of(b.y0), col, round(b.y0, 1), b.x0)
+            else:
+                def order_key(item):
+                    b, _el = item
+                    return (round(b.y0, 1), b.x0)
+            positioned.sort(key=order_key)
+
+            for _, el in positioned:
                 elements.append(el)
                 if el[0] in ("h2", "h3", "p") and len(el[1]) >= 24:
                     plain.append(el[1])
@@ -616,8 +682,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
         doc.close()
 
     if author_lines:
-        byline = _pair_authors(author_lines)
-        elements = [("h3", "Authors"), ("ul", byline)] + elements
+        elements = [("h3", "Authors"), ("ul", _pair_authors(author_lines))] + elements
     return elements, plain
 
 
@@ -655,7 +720,6 @@ PAGE_CSS = """
   h3 { font-size: 1.1em; margin: 1.2em 0 0.4em; }
   p { margin: 0.7em 0; }
   ul { margin: 0.6em 0 0.6em 1.2em; }
-  .byline { color: #444; font-size: 0.95em; }
   figure { margin: 1.2em 0; text-align: center; }
   figure img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; }
   figcaption { font-size: 0.9em; color: #444; margin-top: 6px; font-style: italic; }
@@ -877,8 +941,6 @@ def build_feed(site_dir: Path, public_base: str):
             })
             continue
 
-        # Per-run PDF budget exhausted: keep the published version if we already
-        # have one; only brand-new PDFs are deferred to their original link.
         if is_pdf_url(link) and slug and processed_pdfs >= MAX_PDFS_PER_RUN:
             existing_link = (existing_item.get("link") if existing_item else "") or ""
             if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
