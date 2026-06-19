@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """DB Research PRO builder: reconstruct PDF content as a native web page.
 
-Goal: make each PDF's USEFUL content (text, charts, tables, structure) appear
-on a clean web page "as if the PDF content lived on the page" -- NOT by pasting
-a full-page screenshot of every page (that is what the production dbresearch
-feed does). We reflow real selectable text, crop just the chart/figure regions
-as inline images, rebuild tables as real HTML <table>, and aggressively strip
-boilerplate (running headers/footers, page numbers, the DB contact line,
-template artifacts, and the legal disclaimer block).
+v2 extraction overhaul (a genuine step up from build_dbresearch_lab_feed.py,
+which shared the same naive engine):
+  * Caption-anchored chart cropping. We locate every "Figure N" caption, pick
+    the column it sits in (left/right/full), crop the region from just below
+    the caption down to the next caption/heading, and -- only if that region
+    actually contains vector drawings or images -- render it as ONE crisp
+    inline chart image. The caption itself stays as selectable text. This is
+    what makes charts appear faithfully on the page instead of as axis-label
+    soup (and is NOT a full-page screenshot).
+  * Real-table guard. find_tables() output is only accepted when it looks like
+    a genuine data table (>=2 rows/cols, no cell crammed with many numbers or
+    very long text). Chart gridlines / axis ticks no longer become garbled
+    HTML tables.
+  * Proper boilerplate + disclaimer removal. Repeated running headers/footers
+    are dropped dynamically; the legal back-matter is cut at the
+    "Appendix 1 / Disclosures" heading or known DB disclaimer wording.
 
 Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
 link) -> headless-browser capture, lazily running `playwright install chromium`
-if the browser binary is missing (this is why the old lab feed never
-bootstrapped).
+if the browser binary is missing.
 
 Limits:
   * First run (no live feed yet): at most FIRST_RUN_MAX_ITEMS (=10) articles,
     of which at most MAX_PDFS_PER_RUN (=5) are localized PDFs.
-  * Every run: localize at most MAX_PDFS_PER_RUN (=5) NEW PDFs; already-built
-    items are reused from the published feed and never reprocessed.
-  * PDFs beyond the per-run budget are deferred (kept in the feed pointing at
-    the original PDF) and built on a later run.
+  * Every run: localize at most MAX_PDFS_PER_RUN (=5) NEW (or version-upgraded)
+    PDFs; already-built items at the current render version are reused.
+  * PDFs beyond the budget keep their published version (or, if brand new, are
+    deferred pointing at the original PDF) and are built on a later run.
 
 Reader-optimized: clean semantic HTML is mirrored into <content:encoded> with
 ABSOLUTE image URLs so Readwise Reader renders the full article directly.
@@ -61,15 +69,12 @@ SOURCE_FEED_URL = os.environ.get(
 )
 FEED_NAME = os.environ.get("DBRESEARCH_PRO_FEED_NAME", "dbresearch_pro")
 OUTPUT_FILE = os.environ.get("DBRESEARCH_PRO_OUTPUT_FILE", f"{FEED_NAME}.xml")
-# Feed retention (how many items to keep / how many source entries to scan).
 MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_MAX_ITEMS", "40"))
-# Bootstrap cap: on the very first run (no live feed), keep at most this many.
 FIRST_RUN_MAX_ITEMS = int(os.environ.get("DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS", "10"))
-# Hard cap on NEW PDFs fetched+rendered per run.
 MAX_PDFS_PER_RUN = int(os.environ.get("DBRESEARCH_PRO_MAX_PDFS", "5"))
 MAX_PAGES = int(os.environ.get("DBRESEARCH_PRO_MAX_PAGES", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("DBRESEARCH_PRO_TIMEOUT", "60"))
-# Cropped-figure render scale (charts/diagrams shown inline, in context).
+# Cropped-chart render scale (charts shown inline as faithful images).
 FIG_SCALE = float(os.environ.get("DBRESEARCH_PRO_FIG_SCALE", "2.0"))
 USER_AGENT = os.environ.get(
     "DBRESEARCH_PRO_USER_AGENT",
@@ -80,15 +85,28 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
-DISCLAIMER_MARKERS = (
-    "the information and opinions in this report were prepared",
-    "this report is intended for distribution only to",
+FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
+
+DISCLAIMER_HEADINGS = {
+    "appendix 1",
+    "appendix",
+    "appendix 1: important disclosures",
+    "disclaimer",
+    "disclaimers",
+    "disclosures",
     "important disclosures",
     "analyst certification",
+}
+DISCLAIMER_MARKERS = (
+    "this material has been prepared by",
+    "this material is provided to you for general information",
+    "important research disclosures located in appendix",
+    "this report is approved and/or distributed",
+    "the information and opinions in this report were prepared",
+    "neither deutsche bank ag nor any of its affiliates makes any representation",
     "deutsche bank does and seeks to do business",
-    "the views expressed in this report accurately reflect",
 )
 
 _CHROMIUM_READY = False
@@ -168,6 +186,7 @@ def is_junk_line(line: str) -> bool:
         "deutsche bank research institute",
         "deutsche bank ag",
         "sensitivity: public",
+        "capital markets blog",
         "source: deutsche bank research",
     }:
         return True
@@ -186,59 +205,6 @@ def _covers(big, small) -> bool:
     if inter.is_empty:
         return False
     return _area(inter) >= 0.6 * max(_area(small), 1.0)
-
-
-def _merge_rects(rects):
-    rects = [fitz.Rect(r) for r in rects if not fitz.Rect(r).is_empty]
-    changed = True
-    while changed:
-        changed = False
-        out = []
-        while rects:
-            r = rects.pop()
-            merged = False
-            for i, o in enumerate(out):
-                if r.intersects(o):
-                    out[i] = o | r
-                    merged = True
-                    changed = True
-                    break
-            if not merged:
-                out.append(r)
-        rects = out
-    return rects
-
-
-def collect_figure_rects(page, exclude_rects):
-    parea = _area(page.rect)
-    raw = []
-    try:
-        for img in page.get_images(full=True):
-            xref = img[0]
-            try:
-                for r in page.get_image_rects(xref):
-                    raw.append(fitz.Rect(r))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        for r in page.cluster_drawings():
-            raw.append(fitz.Rect(r))
-    except Exception:
-        pass
-    cleaned = []
-    for r in raw:
-        r = fitz.Rect(r)
-        if r.is_empty or r.width < 55 or r.height < 55:
-            continue
-        a = _area(r)
-        if a > 0.92 * parea or a < 0.012 * parea:
-            continue
-        if any(_covers(ex, r) for ex in exclude_rects):
-            continue
-        cleaned.append(r)
-    return _merge_rects(cleaned)
 
 
 # --------------------------------------------------------------------------- #
@@ -334,7 +300,7 @@ def fetch_pdf_bytes(url: str) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# Structured extraction (semantic text + tables + cropped figures)
+# Structured extraction (semantic text + real tables + cropped charts)
 # --------------------------------------------------------------------------- #
 def _table_to_html(table) -> str:
     try:
@@ -355,6 +321,29 @@ def _table_to_html(table) -> str:
         parts.append("</tbody>")
     parts.append("</table>")
     return "".join(parts)
+
+
+def _table_is_real(table) -> bool:
+    """Reject chart gridlines / axis-label soup masquerading as a table."""
+    try:
+        data = table.extract()
+    except Exception:
+        return False
+    rows = [[normalize_space(c or "") for c in row] for row in (data or [])]
+    rows = [r for r in rows if any(c for c in r)]
+    if len(rows) < 2:
+        return False
+    ncols = max((len(r) for r in rows), default=0)
+    if ncols < 2:
+        return False
+    for r in rows:
+        for c in r:
+            if len(c) > 80:
+                return False
+            numlike = sum(1 for tok in c.split() if re.search(r"\d", tok))
+            if numlike >= 6:
+                return False
+    return True
 
 
 def _detect_boilerplate(doc, total, sizes_out):
@@ -385,96 +374,188 @@ def _detect_boilerplate(doc, total, sizes_out):
 
 
 def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, max_pages: int = MAX_PAGES):
-    """Return (elements, plain_paragraphs). No full-page screenshots."""
+    """Return (elements, plain_paragraphs). Charts are cropped to inline images."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elements = []
     plain = []
     seen_block = set()
     fig_n = 0
     disclaimer_hit = False
+    bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
     try:
         total = min(len(doc), max_pages)
         sizes = []
         boilerplate = _detect_boilerplate(doc, total, sizes)
         median = statistics.median(sizes) if sizes else 10.0
-        bullet = re.compile(r"^([\u2022\u25aa\u00b7\u2013\u2014\-\*]|\d+[.)])\s+")
+
+        def block_info(b):
+            line_texts, line_sizes, bold_flags = [], [], []
+            for ln in b.get("lines", []):
+                spans = ln.get("spans", [])
+                t = normalize_space("".join(sp.get("text", "") for sp in spans))
+                if not t:
+                    continue
+                line_texts.append(t)
+                line_sizes.append(max((sp.get("size", 0.0) for sp in spans), default=median))
+                bold_flags.append(any((sp.get("flags", 0) & 16) for sp in spans))
+            text = normalize_space(" ".join(line_texts))
+            big = max(line_sizes) if line_sizes else median
+            bold = bool(bold_flags) and sum(bold_flags) >= max(1, len(bold_flags) // 2)
+            return line_texts, text, big, bold, fitz.Rect(b.get("bbox"))
 
         for pi in range(total):
             if disclaimer_hit:
                 break
             page = doc.load_page(pi)
+            R = page.rect
+            H, Wp = R.height, R.width
+            mid_x = (R.x0 + R.x1) / 2
+            content_left = R.x0 + 0.04 * Wp
+            content_right = R.x1 - 0.04 * Wp
+
+            blocks = [b for b in page.get_text("dict").get("blocks", []) if b.get("type") == 0]
+            infos = [block_info(b) for b in blocks]
+
+            draw_rects = []
+            try:
+                for d in page.get_drawings():
+                    rr = fitz.Rect(d.get("rect"))
+                    if not rr.is_empty and rr.width > 8 and rr.height > 8:
+                        draw_rects.append(rr)
+            except Exception:
+                pass
+            img_rects = []
+            try:
+                for img in page.get_images(full=True):
+                    try:
+                        for rr in page.get_image_rects(img[0]):
+                            img_rects.append(fitz.Rect(rr))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            graphics = draw_rects + img_rects
+
+            cap_idx = []
+            head_spans = []  # (x0, x1, y0) of heading-like blocks (column boundaries)
+            for i, (lt, text, big, bold, bbox) in enumerate(infos):
+                if not text:
+                    continue
+                if FIG_CAP_RE.match(text):
+                    cap_idx.append(i)
+                elif big >= 1.18 * median and len(text) < 80:
+                    head_spans.append((bbox.x0, bbox.x1, bbox.y0))
+            cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
+
+            def column_of(bbox):
+                if bbox.width / Wp > 0.6:
+                    return "full"
+                return "left" if (bbox.x0 + bbox.x1) / 2 < mid_x else "right"
+
+            def col_xrange(col):
+                if col == "left":
+                    return content_left, mid_x - 0.01 * Wp
+                if col == "right":
+                    return mid_x + 0.01 * Wp, content_right
+                return content_left, content_right
+
+            def in_col(x0, x1, col):
+                if col == "full":
+                    return True
+                cx = (x0 + x1) / 2
+                return cx < mid_x if col == "left" else cx >= mid_x
+
+            fig_items = []  # (caption_bbox, image_name_or_None, caption_text)
+            fig_rects = []
+            for i in cap_idx:
+                lt, text, big, bold, bbox = infos[i]
+                col = column_of(bbox)
+                x0r, x1r = col_xrange(col)
+                cands = []
+                for (bx0, bx1, by0) in cap_spans + head_spans:
+                    if by0 > bbox.y1 + 2 and in_col(bx0, bx1, col):
+                        cands.append(by0)
+                y_bottom = min(cands) if cands else (R.y1 - 0.06 * H)
+                y_bottom = min(y_bottom, bbox.y1 + 0.55 * H)
+                crop = fitz.Rect(x0r, bbox.y1 + 1, x1r, y_bottom - 1) & R
+                if crop.is_empty or crop.height < 40 or crop.width < 60:
+                    fig_items.append((bbox, None, text))
+                    continue
+                has_graphics = any(
+                    crop.intersects(g) and not (crop & g).is_empty and _area(crop & g) > 0.03 * _area(crop)
+                    for g in graphics
+                )
+                if not has_graphics:
+                    fig_items.append((bbox, None, text))
+                    continue
+                try:
+                    fig_n += 1
+                    pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=crop, alpha=False)
+                    name = f"fig-{fig_n:03d}.png"
+                    (out_dir / name).write_bytes(pix.tobytes("png"))
+                    fig_items.append((bbox, name, text))
+                    fig_rects.append(crop)
+                except Exception:
+                    fig_items.append((bbox, None, text))
 
             table_items, table_rects = [], []
             try:
                 for t in page.find_tables().tables:
+                    rr = fitz.Rect(t.bbox)
+                    if any(rr.intersects(fr) and _area(rr & fr) > 0.3 * _area(rr) for fr in fig_rects):
+                        continue
+                    if not _table_is_real(t):
+                        continue
                     th = _table_to_html(t)
                     if th:
-                        rr = fitz.Rect(t.bbox)
                         table_items.append((rr, th))
                         table_rects.append(rr)
             except Exception:
                 pass
 
-            fig_items = []
-            for r in collect_figure_rects(page, table_rects):
-                try:
-                    clip = r & page.rect
-                    if clip.is_empty:
-                        continue
-                    fig_n += 1
-                    pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=clip, alpha=False)
-                    name = f"fig-{fig_n:03d}.png"
-                    (out_dir / name).write_bytes(pix.tobytes("png"))
-                    fig_items.append((r, name))
-                except Exception:
-                    pass
-
             positioned = []
-            for b in page.get_text("dict").get("blocks", []):
-                if b.get("type") != 0:
+            for (lt, text, big, bold, bbox) in infos:
+                if not text or FIG_CAP_RE.match(text):
                     continue
-                bbox = fitz.Rect(b.get("bbox"))
+                if any(_covers(fr, bbox) for fr in fig_rects):
+                    continue
                 if any(_covers(rr, bbox) for rr in table_rects):
                     continue
-                if any(_covers(rr, bbox) for rr, _ in fig_items):
+                kept = [t for t in lt if not is_junk_line(t) and t.lower() not in boilerplate]
+                if not kept:
                     continue
-                line_texts, line_sizes, bold_flags = [], [], []
-                for ln in b.get("lines", []):
-                    spans = ln.get("spans", [])
-                    t = normalize_space("".join(sp.get("text", "") for sp in spans))
-                    if not t or is_junk_line(t) or t.lower() in boilerplate:
-                        continue
-                    line_texts.append(t)
-                    line_sizes.append(max((sp.get("size", 0.0) for sp in spans), default=median))
-                    bold_flags.append(any((sp.get("flags", 0) & 16) for sp in spans))
-                if not line_texts:
-                    continue
-                block_text = normalize_space(" ".join(line_texts))
-                low = block_text.lower()
-                if len(block_text) > 120 and any(m in low for m in DISCLAIMER_MARKERS):
+                btext = normalize_space(" ".join(kept))
+                low = btext.lower()
+                heading_like = (big >= 1.18 * median or bold) and len(btext) < 60
+                if (heading_like and low in DISCLAIMER_HEADINGS) or (
+                    len(btext) > 120 and any(m in low for m in DISCLAIMER_MARKERS)
+                ):
                     disclaimer_hit = True
                     break
-                if len(block_text) < 80 and low in seen_block:
+                if "important research disclosures located in appendix" in low:
                     continue
-                if len(block_text) < 80:
+                if len(btext) < 80 and low in seen_block:
+                    continue
+                if len(btext) < 80:
                     seen_block.add(low)
-                big = max(line_sizes) if line_sizes else median
-                bold = sum(bold_flags) >= max(1, len(bold_flags) // 2)
                 y0, x0 = bbox.y0, bbox.x0
-                if big >= 1.45 * median and len(block_text) < 200:
-                    positioned.append((y0, x0, ("h2", block_text)))
-                elif (big >= 1.18 * median or bold) and len(block_text) < 160:
-                    positioned.append((y0, x0, ("h3", block_text)))
-                elif len(line_texts) >= 2 and all(bullet.match(t) for t in line_texts):
-                    items = [bullet.sub("", t).strip() for t in line_texts]
+                if big >= 1.45 * median and len(btext) < 200:
+                    positioned.append((y0, x0, ("h2", btext)))
+                elif (big >= 1.18 * median or bold) and len(btext) < 160:
+                    positioned.append((y0, x0, ("h3", btext)))
+                elif len(kept) >= 2 and all(bullet.match(t) for t in kept):
+                    items = [bullet.sub("", t).strip() for t in kept]
                     positioned.append((y0, x0, ("ul", items)))
                 else:
-                    positioned.append((y0, x0, ("p", block_text)))
+                    positioned.append((y0, x0, ("p", btext)))
 
             for rr, th in table_items:
                 positioned.append((rr.y0, rr.x0, ("table", th)))
-            for rr, name in fig_items:
-                positioned.append((rr.y0, rr.x0, ("figure", name, "")))
+            for bbox, name, cap_text in fig_items:
+                if name:
+                    positioned.append((bbox.y0, bbox.x0, ("figure", name, cap_text)))
+                else:
+                    positioned.append((bbox.y0, bbox.x0, ("h3", cap_text)))
 
             positioned.sort(key=lambda e: (round(e[0], 1), e[1]))
             for _, _, el in positioned:
@@ -510,7 +591,7 @@ def render_elements(elements: list, img_prefix: str = "") -> str:
             src = html.escape(img_prefix + el[1])
             cap = html.escape(el[2]) if len(el) > 2 and el[2] else ""
             cap_html = f"<figcaption>{cap}</figcaption>" if cap else ""
-            parts.append(f'<figure><img src="{src}" alt="{cap or "figure"}" loading="lazy">{cap_html}</figure>')
+            parts.append(f'<figure><img src="{src}" alt="{cap or "chart"}" loading="lazy">{cap_html}</figure>')
     return "\n".join(parts)
 
 
@@ -524,7 +605,7 @@ PAGE_CSS = """
   ul { margin: 0.6em 0 0.6em 1.2em; }
   figure { margin: 1.2em 0; text-align: center; }
   figure img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; }
-  figcaption { font-size: 0.85em; color: #666; margin-top: 6px; }
+  figcaption { font-size: 0.9em; color: #444; margin-top: 6px; font-style: italic; }
   .tablewrap { overflow-x: auto; margin: 1.1em 0; }
   table { border-collapse: collapse; width: 100%; font-size: 0.92em; }
   th, td { border: 1px solid #ddd; padding: 6px 9px; text-align: left; vertical-align: top; }
@@ -743,20 +824,34 @@ def build_feed(site_dir: Path, public_base: str):
             })
             continue
 
-        # Defer new PDFs beyond the per-run budget: keep them in the feed
-        # pointing at the original PDF so they get built on a later run.
+        # Per-run PDF budget exhausted: keep the published version if we already
+        # have one; only brand-new PDFs are deferred to their original link.
         if is_pdf_url(link) and slug and processed_pdfs >= MAX_PDFS_PER_RUN:
-            print(f"INFO: deferring (per-run PDF budget reached) {link}")
-            output_items.append({
-                "title": title,
-                "link": link,
-                "guid": guid,
-                "pub_date": pub_date,
-                "description": description or shorten(title),
-                "content_html": "",
-                "is_permalink": bool(guid == link and link.startswith("http")),
-            })
-            new_or_built += 1 if guid not in existing_guid_map else 0
+            existing_link = (existing_item.get("link") if existing_item else "") or ""
+            if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
+                    and existing_item.get("content_html")):
+                print(f"INFO: budget reached; keeping published version of {link}")
+                output_items.append({
+                    "title": existing_item.get("title") or title,
+                    "link": existing_link,
+                    "guid": existing_item.get("guid") or guid,
+                    "pub_date": existing_item.get("pub_date") or pub_date,
+                    "description": existing_item.get("description") or description or shorten(title),
+                    "content_html": existing_item.get("content_html") or "",
+                    "is_permalink": True,
+                })
+            else:
+                print(f"INFO: deferring (per-run PDF budget reached) {link}")
+                output_items.append({
+                    "title": title,
+                    "link": link,
+                    "guid": guid,
+                    "pub_date": pub_date,
+                    "description": description or shorten(title),
+                    "content_html": "",
+                    "is_permalink": bool(guid == link and link.startswith("http")),
+                })
+                new_or_built += 1 if guid not in existing_guid_map else 0
             continue
 
         final_link, final_guid = link, guid
