@@ -121,7 +121,7 @@ jobs:
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           SCHEME=https
           BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          DBRESEARCH_PRO_MAX_PDFS="${DBRESEARCH_PRO_MAX_PDFS:-5}" \
+          DBRESEARCH_PRO_MAX_PDFS="${DBRESEARCH_PRO_MAX_PDFS:-12}" \
           DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS="${DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS:-10}" \
             python scripts/build_dbresearch_pro_feed.py site "$BASE_URL" \
             || echo "[pro] dbresearch_pro build failed; deploying without it (production feeds unaffected)"
