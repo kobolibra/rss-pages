@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """DB Research PRO builder: reconstruct PDF content as a native web page.
 
-v4 extraction:
-  * Layout-aware reading order. Each page is classified as a true multi-column
-    layout (independent side-by-side panels, e.g. a country grid) or a
-    single-flow / label+content layout, by testing how many text blocks cross
-    the page midline. Multi-column pages are read column-major (whole left
-    column, then whole right column) within bands delimited by full-width
-    spanning elements; everything else is read row-major (y, then x). This
-    stops the left/right panels of dashboard PDFs from interleaving.
-  * Box-bullet lists. DB's bullet glyph (❑ and friends) is recognized, and a
-    bullet that wraps across several lines is merged into a single list item.
-  * Inline legal/cert noise removal vs. end-matter hard stop. Footer
-    disclaimers, "Analyst Certification" blocks, emails and bare URLs are
-    dropped in place WITHOUT truncating the document; only the dedicated
-    "Appendix 1 / Disclosures" end-matter (or its opening DB disclaimer
-    sentence) stops extraction.
-  * Author/sidebar de-interleaving, source-anchored chart cropping and
-    content-driven figure bounding boxes (from v3) are retained.
-  * Real-table guard keeps genuine data tables and rejects chart-axis soup.
+v5 extraction:
+  * Layout-driven chart cropping. Each Figure is cropped from just below its
+    caption down to its own "Source :" line, spanning the column width
+    (full-width, or a single half when two captions sit side by side). Vector
+    drawings/images are used only to tighten the left/right bounds when present
+    - they are NO LONGER required to crop, so pure vector bar/line/bubble charts
+    (which previously vanished, leaving only a caption and stray axis labels)
+    are now captured as images.
+  * Gridded data tables still render as HTML; if a caption's region sits over a
+    detected real table, it is rendered as a table (caption becomes a heading)
+    instead of an image. Borderless numeric tables that table-detection misses
+    are captured as cropped images rather than disappearing.
+  * Text blocks inside any crop region are excluded from the body, so in-figure
+    axis/legend/data labels no longer leak into the prose.
+  * Figure-grid pages are read row-major (Figure 1, 2, 3 ...); genuine
+    multi-column prose (e.g. dashboards) is still read column-major. The
+    column/row decision is based only on prose text blocks.
+  * Author/sidebar de-interleaving, box-bullet (❑) lists with wrapped items,
+    and inline legal/cert noise removal vs. Appendix-1 hard stop are retained.
 
 Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
 link) -> headless-browser capture, lazily running `playwright install chromium`
@@ -86,7 +87,7 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 4
+RENDER_VERSION = 5
 
 FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
 SOURCE_RE = re.compile(r"^\s*source\b", re.I)
@@ -203,6 +204,8 @@ def is_junk_line(line: str) -> bool:
         "deutsche bank research institute",
         "deutsche bank ag",
         "deutsche bank ag/london",
+        "deutsche bank ag/hong kong",
+        "asia economic notes",
         "sensitivity: public",
         "capital markets blog",
         "source: deutsche bank research",
@@ -424,7 +427,7 @@ def _bullet_split(lines):
 
 
 def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pages: int = MAX_PAGES):
-    """Return (elements, plain). Layout-aware ordering; charts -> inline images."""
+    """Return (elements, plain). Layout-driven ordering; charts -> inline images."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     elements = []
     plain = []
@@ -468,7 +471,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
             try:
                 for d in page.get_drawings():
                     rr = fitz.Rect(d.get("rect"))
-                    if not rr.is_empty and rr.width > 8 and rr.height > 8:
+                    if not rr.is_empty and rr.width > 5 and rr.height > 5:
                         draw_rects.append(rr)
             except Exception:
                 pass
@@ -520,7 +523,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                     page_authors.sort(key=lambda e: e[0])
                     author_lines.extend(t for _, t in page_authors if t)
 
-            # ---- caption detection ----
+            # ---- caption + heading detection ----
             cap_idx = []
             head_spans = []
             for i, (lt, text, big, bold, bbox) in enumerate(infos):
@@ -532,67 +535,11 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                     head_spans.append((bbox.x0, bbox.x1, bbox.y0))
             cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
 
-            # ---- per-figure cropping (source-anchored, content-driven bbox) ----
-            fig_items = []  # (order_bbox, image_name_or_None, caption_text)
-            fig_rects = []
-            for i in cap_idx:
-                lt, text, big, bold, cbbox = infos[i]
-                col = column_of(cbbox)
-                cands = [by0 for (bx0, bx1, by0) in (cap_spans + head_spans)
-                         if by0 > cbbox.y1 + 2 and in_col(bx0, bx1, col)]
-                y_limit = min(cands) if cands else (R.y1 - 0.06 * H)
-                y_limit = min(y_limit, cbbox.y1 + 0.55 * H)
-                gset = [g for g in graphics
-                        if g.height > 8 and g.width > 8
-                        and g.y1 > cbbox.y0 and g.y0 < y_limit
-                        and in_col(g.x0, g.x1, col)]
-                if not gset:
-                    fig_items.append((cbbox, None, text))
-                    continue
-                gx0 = min(g.x0 for g in gset)
-                gx1 = max(g.x1 for g in gset)
-                gy1 = max(g.y1 for g in gset)
-                src_y = None
-                for j, (lt2, text2, big2, bold2, bbox2) in enumerate(infos):
-                    if j in author_idxs or not text2:
-                        continue
-                    if (bbox2.y0 >= cbbox.y1 and bbox2.y0 < y_limit
-                            and in_col(bbox2.x0, bbox2.x1, col) and SOURCE_RE.match(text2)):
-                        src_y = bbox2.y1 if src_y is None else max(src_y, bbox2.y1)
-                bottom = (src_y if src_y is not None else gy1) + 3
-                bottom = min(bottom, y_limit - 1)
-                top = cbbox.y1 + 1
-                for (lt2, text2, big2, bold2, bbox2) in infos:
-                    if (bbox2.y0 >= top - 2 and bbox2.y1 <= bottom + 2
-                            and in_col(bbox2.x0, bbox2.x1, col)
-                            and not SOURCE_RE.match(text2) and not FIG_CAP_RE.match(text2)
-                            and len(text2) < 60):
-                        gx0 = min(gx0, bbox2.x0)
-                        gx1 = max(gx1, bbox2.x1)
-                x0c = min(gx0, cbbox.x0) - 3
-                x1c = max(gx1, cbbox.x1) + 5
-                crop = fitz.Rect(x0c, top, x1c, bottom) & R
-                order_bbox = fitz.Rect(crop.x0, cbbox.y0, crop.x1, crop.y1)
-                if crop.is_empty or crop.height < 30 or crop.width < 60:
-                    fig_items.append((cbbox, None, text))
-                    continue
-                try:
-                    fig_n += 1
-                    pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=crop, alpha=False)
-                    name = f"fig-{fig_n:03d}.png"
-                    (out_dir / name).write_bytes(pix.tobytes("png"))
-                    fig_items.append((order_bbox, name, text))
-                    fig_rects.append(crop)
-                except Exception:
-                    fig_items.append((cbbox, None, text))
-
-            # ---- real tables (skip chart-axis soup and figure overlaps) ----
+            # ---- real (gridded) tables first ----
             table_items, table_rects = [], []
             try:
                 for t in page.find_tables().tables:
                     rr = fitz.Rect(t.bbox)
-                    if any(rr.intersects(fr) and _area(rr & fr) > 0.3 * _area(rr) for fr in fig_rects):
-                        continue
                     if not _table_is_real(t):
                         continue
                     th = _table_to_html(t)
@@ -601,6 +548,74 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                         table_rects.append(rr)
             except Exception:
                 pass
+
+            # ---- layout-driven figure cropping ----
+            def has_sidebyside(cb):
+                for j in cap_idx:
+                    ob = infos[j][4]
+                    if ob is cb:
+                        continue
+                    if abs(ob.y0 - cb.y0) < 25 and (((cb.x0 + cb.x1) / 2 < mid_x) != ((ob.x0 + ob.x1) / 2 < mid_x)):
+                        return True
+                return False
+
+            fig_items = []
+            fig_rects = []
+            for i in cap_idx:
+                lt, text, big, bold, cbbox = infos[i]
+                cands = [by0 for (bx0, bx1, by0) in (cap_spans + head_spans) if by0 > cbbox.y1 + 2]
+                y_limit = min(cands) if cands else (R.y1 - 0.05 * H)
+                y_limit = min(y_limit, cbbox.y1 + 0.62 * H)
+                region_top = cbbox.y1 + 1
+                # nearest "Source :" line below the caption (the chart's own footer)
+                src_y = None
+                for (lt2, text2, big2, bold2, bbox2) in infos:
+                    if not text2:
+                        continue
+                    if bbox2.y0 >= cbbox.y1 - 2 and bbox2.y0 < y_limit and SOURCE_RE.match(text2):
+                        src_y = bbox2.y1 if src_y is None else max(src_y, bbox2.y1)
+                # column-width x-range (half when side-by-side, else full width)
+                if has_sidebyside(cbbox):
+                    if (cbbox.x0 + cbbox.x1) / 2 < mid_x:
+                        xr0, xr1 = R.x0 + 0.02 * Wp, mid_x - 0.005 * Wp
+                    else:
+                        xr0, xr1 = mid_x + 0.005 * Wp, R.x1 - 0.02 * Wp
+                else:
+                    xr0, xr1 = R.x0 + 0.02 * Wp, R.x1 - 0.02 * Wp
+                band_bot = src_y if src_y is not None else (y_limit - 2)
+                ginx = [g for g in graphics
+                        if g.height > 5 and g.width > 5
+                        and g.y1 > region_top and g.y0 < band_bot
+                        and (g.x0 + g.x1) / 2 >= xr0 - 2 and (g.x0 + g.x1) / 2 <= xr1 + 2]
+                gy1 = None
+                if ginx:
+                    gx0 = min(g.x0 for g in ginx)
+                    gx1 = max(g.x1 for g in ginx)
+                    gy1 = max(g.y1 for g in ginx)
+                    xr0 = max(xr0, min(gx0, cbbox.x0) - 4)
+                    xr1 = min(xr1, max(gx1, cbbox.x1) + 5)
+                if src_y is not None:
+                    bottom = src_y + 3
+                elif gy1 is not None:
+                    bottom = gy1 + 3
+                else:
+                    bottom = y_limit - 2
+                bottom = min(bottom, y_limit - 1)
+                region_rect = fitz.Rect(xr0, region_top, xr1, bottom)
+                crop = region_rect & R
+                overlaps_table = any(_area(region_rect & tr) > 0.25 * _area(tr) for tr in table_rects)
+                if overlaps_table or crop.is_empty or crop.height < 38 or crop.width < 80:
+                    fig_items.append((cbbox, None, text))
+                    continue
+                try:
+                    fig_n += 1
+                    pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=crop, alpha=False)
+                    name = f"fig-{fig_n:03d}.png"
+                    (out_dir / name).write_bytes(pix.tobytes("png"))
+                    fig_items.append((fitz.Rect(crop.x0, cbbox.y0, crop.x1, crop.y1), name, text))
+                    fig_rects.append(crop)
+                except Exception:
+                    fig_items.append((cbbox, None, text))
 
             # ---- body text ----
             positioned = []  # (bbox, element)
@@ -649,10 +664,13 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
             for ob, name, cap_text in fig_items:
                 positioned.append((ob, ("figure", name, cap_text) if name else ("h3", cap_text)))
 
-            # ---- layout-aware ordering ----
-            nonfw = [b for b, _ in positioned if not is_fw(b)]
-            n_cross = sum(1 for b in nonfw if crosses_mid(b))
-            two_col = len(nonfw) >= 4 and n_cross <= 0.25 * len(nonfw)
+            # ---- layout-aware ordering (column-major only for genuine prose columns) ----
+            text_bboxes = [b for b, el in positioned if el[0] in ("p", "ul", "h2", "h3") and not is_fw(b)]
+            left_ct = sum(1 for b in text_bboxes if (b.x0 + b.x1) / 2 < mid_x)
+            right_ct = sum(1 for b in text_bboxes if (b.x0 + b.x1) / 2 >= mid_x)
+            n_cross = sum(1 for b in text_bboxes if crosses_mid(b))
+            two_col = (len(text_bboxes) >= 4 and left_ct >= 2 and right_ct >= 2
+                       and n_cross <= 0.2 * len(text_bboxes))
             if two_col:
                 divs = sorted(b.y0 for b, _ in positioned if is_fw(b))
 
@@ -661,10 +679,7 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
 
                 def order_key(item):
                     b, _el = item
-                    if is_fw(b):
-                        col = -1
-                    else:
-                        col = 0 if (b.x0 + b.x1) / 2 < mid_x else 1
+                    col = -1 if is_fw(b) else (0 if (b.x0 + b.x1) / 2 < mid_x else 1)
                     return (band_of(b.y0), col, round(b.y0, 1), b.x0)
             else:
                 def order_key(item):
