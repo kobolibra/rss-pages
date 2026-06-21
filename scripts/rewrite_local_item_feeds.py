@@ -85,6 +85,43 @@ def get_text(el, tag: str) -> str:
     return (node.text or "").strip() if node is not None and node.text else ""
 
 
+def _strip_namespaces(elem):
+    # 去掉整棵子树上的命名空间前缀，使其能脱离父节点单独序列化，
+    # 避免 ElementTree 抛 "prefix '...' not found in prefix map"。
+    for node in elem.iter():
+        if isinstance(node.tag, str):
+            if "}" in node.tag:
+                node.tag = node.tag.split("}", 1)[1]
+            elif ":" in node.tag:
+                node.tag = node.tag.split(":", 1)[1]
+        if node.attrib:
+            cleaned = {}
+            for key, value in node.attrib.items():
+                if "}" in key:
+                    key = key.split("}", 1)[1]
+                elif ":" in key:
+                    key = key.split(":", 1)[1]
+                cleaned[key] = value
+            node.attrib = cleaned
+    return elem
+
+
+def _serialize_child(child) -> str:
+    # content:encoded 抓回来的子节点可能带有未声明的命名空间前缀，单独序列化
+    # 会抛 "prefix '...' not found in prefix map"。策略：先正常序列化；失败则
+    # 去掉命名空间前缀后重试（保留 HTML 结构）；再失败才降级为纯文本，
+    # 确保整条 feed 的本地化改写不会因为正文里一个坏节点而整体失败被跳过。
+    try:
+        return ET.tostring(child, encoding="unicode", method="xml")
+    except Exception:
+        pass
+    try:
+        return ET.tostring(_strip_namespaces(child), encoding="unicode", method="xml")
+    except Exception as exc:
+        print(f"warn: content:encoded child serialize failed ({exc}); using text fallback")
+        return "".join(child.itertext())
+
+
 def get_content_encoded(el) -> str:
     node = el.find(qname_local("encoded"))
     if node is None:
@@ -94,7 +131,7 @@ def get_content_encoded(el) -> str:
     if node.text and node.text.strip():
         parts.append(node.text)
     for child in list(node):
-        parts.append(ET.tostring(child, encoding="unicode", method="xml"))
+        parts.append(_serialize_child(child))
         if child.tail and child.tail.strip():
             parts.append(child.tail)
     return "".join(parts).strip()

@@ -82,9 +82,14 @@ def validate_blackrock_local_page(local_path: Path):
     page_text = strip_html(page_html).lower()
     if len(page_text) < 500:
         fail(f'BlackRock local item page unexpectedly short: {len(page_text)} chars')
-    for needle in ['our bottom line', 'market backdrop', 'week ahead']:
-        if needle not in page_text:
-            fail(f'BlackRock local item page missing body marker: {needle}')
+    # BlackRock 周评版式会变：旧版含 'our bottom line'，新版改用
+    # 'market backdrop' / 'week ahead' 等小标题。硬性要求三词全有，会在版式
+    # 更新时误判失败、触发 restore 把 feed 冻结在旧副本（barclays 也被连坐）。
+    # 改为“至少命中 2 个标记”：既保留对坏抓取的兜底防护，又不会因版式微调冻结更新。
+    markers = ['our bottom line', 'market backdrop', 'week ahead']
+    present = [m for m in markers if m in page_text]
+    if len(present) < 2:
+        fail(f'BlackRock local item page has too few body markers; found only {present}')
 
 
 def extract_natural_source_link(page_html: str) -> str:
