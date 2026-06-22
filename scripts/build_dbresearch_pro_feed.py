@@ -20,6 +20,13 @@ v4 extraction:
     content-driven figure bounding boxes (from v3) are retained.
   * Real-table guard keeps genuine data tables and rejects chart-axis soup.
 
+v5 figures: every captioned Figure/Chart/Exhibit is rendered as a faithful
+image crop (with a column-geometry fallback when PyMuPDF reports no vector or
+image rects), so chart-figures are no longer mis-read as garbled tables and
+table-figures are no longer dropped or flattened into prose. The figure's own
+Source line anchors the crop bottom and is bounded only by the next caption, so
+inner coloured band rows can't prematurely truncate a full-page exhibit.
+
 Fetching is robust: direct binary -> viewer-page scrape (var pdfUrl / canonical
 link) -> headless-browser capture, lazily running `playwright install chromium`
 if the browser binary is missing.
@@ -86,7 +93,7 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 7
+RENDER_VERSION = 8
 
 FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
 SOURCE_RE = re.compile(r"^\s*source\b", re.I)
@@ -532,36 +539,72 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                     head_spans.append((bbox.x0, bbox.x1, bbox.y0))
             cap_spans = [(infos[i][4].x0, infos[i][4].x1, infos[i][4].y0) for i in cap_idx]
 
-            # ---- per-figure cropping (source-anchored, content-driven bbox) ----
+            # ---- per-figure cropping (source-anchored; every captioned figure
+            #      becomes an IMAGE so charts AND table-figures keep their
+            #      original styling. A column-geometry fallback crops the band
+            #      when PyMuPDF reports no vector/image rects, so chart-figures
+            #      are no longer dropped or mis-extracted as garbled tables). ----
             fig_items = []  # (order_bbox, image_name_or_None, caption_text)
             fig_rects = []
+
+            def _col_xbounds(c):
+                if c == "left":
+                    return (R.x0 + 0.035 * Wp, mid_x + 0.02 * Wp)
+                if c == "right":
+                    return (mid_x - 0.02 * Wp, R.x1 - 0.035 * Wp)
+                return (R.x0 + 0.035 * Wp, R.x1 - 0.035 * Wp)
+
             for i in cap_idx:
                 lt, text, big, bold, cbbox = infos[i]
                 col = column_of(cbbox)
+                # The figure's own Source line is bounded only by the NEXT figure
+                # caption: inner coloured band rows (e.g. a 'Phase 2' row inside a
+                # table) must not prematurely truncate a full-page exhibit crop.
+                cap_cands = [by0 for (bx0, bx1, by0) in cap_spans
+                             if by0 > cbbox.y1 + 2 and in_col(bx0, bx1, col)]
+                src_limit = min(cap_cands) if cap_cands else (cbbox.y1 + 0.85 * H)
+                src_limit = min(src_limit, cbbox.y1 + 0.85 * H)
+                # Captions + headings give a more conservative bound for graphics
+                # gathering and for the no-source fallback bottom.
                 cands = [by0 for (bx0, bx1, by0) in (cap_spans + head_spans)
                          if by0 > cbbox.y1 + 2 and in_col(bx0, bx1, col)]
                 y_limit = min(cands) if cands else (R.y1 - 0.06 * H)
-                y_limit = min(y_limit, cbbox.y1 + 0.55 * H)
+                y_limit = min(y_limit, cbbox.y1 + 0.85 * H)
+
+                src_y = None
+                for (lt2, text2, big2, bold2, bbox2) in infos:
+                    if not text2:
+                        continue
+                    if (bbox2.y0 >= cbbox.y1 and bbox2.y0 < src_limit
+                            and in_col(bbox2.x0, bbox2.x1, col) and SOURCE_RE.match(text2)):
+                        src_y = bbox2.y1 if src_y is None else min(src_y, bbox2.y1)
+
+                region_bottom = src_limit if src_y is None else min(src_y + 6, src_limit)
                 gset = [g for g in graphics
                         if g.height > 8 and g.width > 8
-                        and g.y1 > cbbox.y0 and g.y0 < y_limit
+                        and g.y1 > cbbox.y0 and g.y0 < region_bottom
                         and in_col(g.x0, g.x1, col)]
-                if not gset:
-                    fig_items.append((cbbox, None, text))
-                    continue
-                gx0 = min(g.x0 for g in gset)
-                gx1 = max(g.x1 for g in gset)
-                gy1 = max(g.y1 for g in gset)
-                src_y = None
-                for j, (lt2, text2, big2, bold2, bbox2) in enumerate(infos):
-                    if j in author_idxs or not text2:
-                        continue
-                    if (bbox2.y0 >= cbbox.y1 and bbox2.y0 < y_limit
-                            and in_col(bbox2.x0, bbox2.x1, col) and SOURCE_RE.match(text2)):
-                        src_y = bbox2.y1 if src_y is None else max(src_y, bbox2.y1)
-                bottom = (src_y if src_y is not None else gy1) + 3
-                bottom = min(bottom, y_limit - 1)
+
+                if gset:
+                    gx0 = min(g.x0 for g in gset)
+                    gx1 = max(g.x1 for g in gset)
+                    gy1 = max(g.y1 for g in gset)
+                else:
+                    # No detected vectors/images: fall back to column geometry so
+                    # the chart/table region is still captured as a faithful crop.
+                    cb0, cb1 = _col_xbounds(col)
+                    gx0, gx1, gy1 = cb0, cb1, None
+
+                if src_y is not None:
+                    bottom = src_y + 3
+                elif gy1 is not None:
+                    bottom = gy1 + 3
+                else:
+                    bottom = y_limit - 1
+                bottom = min(bottom, cbbox.y1 + 0.85 * H, R.y1 - 0.02 * H)
                 top = cbbox.y1 + 1
+
+                # Pull in short labels (axis ticks, data callouts) around the figure.
                 for (lt2, text2, big2, bold2, bbox2) in infos:
                     if (bbox2.y0 >= top - 2 and bbox2.y1 <= bottom + 2
                             and in_col(bbox2.x0, bbox2.x1, col)
@@ -569,11 +612,12 @@ def extract_pdf_content(pdf_bytes: bytes, out_dir: Path, title: str = "", max_pa
                             and len(text2) < 60):
                         gx0 = min(gx0, bbox2.x0)
                         gx1 = max(gx1, bbox2.x1)
+
                 x0c = min(gx0, cbbox.x0) - 3
                 x1c = max(gx1, cbbox.x1) + 5
                 crop = fitz.Rect(x0c, top, x1c, bottom) & R
                 order_bbox = fitz.Rect(crop.x0, cbbox.y0, crop.x1, crop.y1)
-                if crop.is_empty or crop.height < 30 or crop.width < 60:
+                if crop.is_empty or crop.height < 24 or crop.width < 60:
                     fig_items.append((cbbox, None, text))
                     continue
                 try:
@@ -936,128 +980,4 @@ def build_feed(site_dir: Path, public_base: str):
                 "guid": existing_item.get("guid") or guid,
                 "pub_date": existing_item.get("pub_date") or pub_date,
                 "description": existing_item.get("description") or description or shorten(title),
-                "content_html": existing_item.get("content_html") or "",
-                "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
-            })
-            continue
-
-        if is_pdf_url(link) and slug and processed_pdfs >= MAX_PDFS_PER_RUN:
-            existing_link = (existing_item.get("link") if existing_item else "") or ""
-            if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
-                    and existing_item.get("content_html")):
-                print(f"INFO: budget reached; keeping published version of {link}")
-                output_items.append({
-                    "title": existing_item.get("title") or title,
-                    "link": existing_link,
-                    "guid": existing_item.get("guid") or guid,
-                    "pub_date": existing_item.get("pub_date") or pub_date,
-                    "description": existing_item.get("description") or description or shorten(title),
-                    "content_html": existing_item.get("content_html") or "",
-                    "is_permalink": True,
-                })
-            else:
-                print(f"INFO: deferring (per-run PDF budget reached) {link}")
-                output_items.append({
-                    "title": title,
-                    "link": link,
-                    "guid": guid,
-                    "pub_date": pub_date,
-                    "description": description or shorten(title),
-                    "content_html": "",
-                    "is_permalink": bool(guid == link and link.startswith("http")),
-                })
-                new_or_built += 1 if guid not in existing_guid_map else 0
-            continue
-
-        final_link, final_guid = link, guid
-        is_permalink = bool(guid == link and link.startswith("http"))
-        content_html = ""
-
-        if is_pdf_url(link) and slug:
-            out_dir = item_root / slug
-            out_dir.mkdir(parents=True, exist_ok=True)
-            local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
-            cached_pdf = out_dir / "original.pdf"
-
-            pdf_bytes = None
-            if cached_pdf.exists() and cached_pdf.stat().st_size > 1000:
-                pdf_bytes = cached_pdf.read_bytes()
-                print(f"INFO: reusing cached PDF (no download) for {link}")
-            else:
-                try:
-                    pdf_bytes = fetch_pdf_bytes(link)
-                    cached_pdf.write_bytes(pdf_bytes)
-                except Exception as exc:
-                    print(f"WARN: fetch PDF failed for {link}: {exc}")
-
-            elements, plain = [], []
-            if pdf_bytes:
-                for old in (list(out_dir.glob("fig-*.png")) + list(out_dir.glob("page-*.png"))):
-                    try:
-                        old.unlink()
-                    except Exception:
-                        pass
-                try:
-                    elements, plain = extract_pdf_content(pdf_bytes, out_dir, title=title)
-                except Exception as exc:
-                    print(f"WARN: extraction failed for {link}: {exc}")
-
-            if not description:
-                description = shorten(plain[0] if plain else title)
-
-            reader_body = render_elements(elements, img_prefix="")
-            reader_abs = render_elements(elements, img_prefix=local_url)
-            content_html = reader_abs
-            (out_dir / "index.html").write_text(
-                build_local_page(title, link, "original.pdf" if pdf_bytes else None, reader_body),
-                encoding="utf-8",
-            )
-            final_link = final_guid = local_url
-            is_permalink = True
-            processed_pdfs += 1
-            pdf_count += 1
-            new_or_built += 1
-        elif not description:
-            description = shorten(title)
-
-        if guid not in existing_guid_map:
-            new_or_built += 1
-
-        output_items.append({
-            "title": title,
-            "link": final_link,
-            "guid": final_guid,
-            "pub_date": pub_date,
-            "description": description,
-            "content_html": content_html,
-            "is_permalink": is_permalink,
-        })
-
-    for item in output_items:
-        rss_item = ET.SubElement(channel, "item")
-        ET.SubElement(rss_item, "title").text = item["title"]
-        ET.SubElement(rss_item, "link").text = item["link"]
-        guid_el = ET.SubElement(rss_item, "guid")
-        guid_el.set("isPermaLink", "true" if item["is_permalink"] else "false")
-        guid_el.text = item["guid"]
-        ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
-        ET.SubElement(rss_item, "description").text = item.get("description") or ""
-        if item.get("content_html"):
-            ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
-
-    if new_or_built == 0 and output_path.exists():
-        print(f"no new {FEED_NAME} items; kept existing feed and pages")
-        return
-
-    xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
-    output_path.write_bytes(xml_bytes)
-    print(f"Saved {output_path} (items={len(output_items)}, pdf_built={pdf_count}, budget={MAX_PDFS_PER_RUN}, bootstrap={is_bootstrap})")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python build_dbresearch_pro_feed.py <site_dir> <public_base>")
-        sys.exit(1)
-    site_dir = Path(sys.argv[1])
-    site_dir.mkdir(parents=True, exist_ok=True)
-    build_feed(site_dir, sys.argv[2])
+                
