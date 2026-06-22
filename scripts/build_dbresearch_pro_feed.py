@@ -980,4 +980,128 @@ def build_feed(site_dir: Path, public_base: str):
                 "guid": existing_item.get("guid") or guid,
                 "pub_date": existing_item.get("pub_date") or pub_date,
                 "description": existing_item.get("description") or description or shorten(title),
-                
+                "content_html": existing_item.get("content_html") or "",
+                "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
+            })
+            continue
+
+        if is_pdf_url(link) and slug and processed_pdfs >= MAX_PDFS_PER_RUN:
+            existing_link = (existing_item.get("link") if existing_item else "") or ""
+            if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
+                    and existing_item.get("content_html")):
+                print(f"INFO: budget reached; keeping published version of {link}")
+                output_items.append({
+                    "title": existing_item.get("title") or title,
+                    "link": existing_link,
+                    "guid": existing_item.get("guid") or guid,
+                    "pub_date": existing_item.get("pub_date") or pub_date,
+                    "description": existing_item.get("description") or description or shorten(title),
+                    "content_html": existing_item.get("content_html") or "",
+                    "is_permalink": True,
+                })
+            else:
+                print(f"INFO: deferring (per-run PDF budget reached) {link}")
+                output_items.append({
+                    "title": title,
+                    "link": link,
+                    "guid": guid,
+                    "pub_date": pub_date,
+                    "description": description or shorten(title),
+                    "content_html": "",
+                    "is_permalink": bool(guid == link and link.startswith("http")),
+                })
+                new_or_built += 1 if guid not in existing_guid_map else 0
+            continue
+
+        final_link, final_guid = link, guid
+        is_permalink = bool(guid == link and link.startswith("http"))
+        content_html = ""
+
+        if is_pdf_url(link) and slug:
+            out_dir = item_root / slug
+            out_dir.mkdir(parents=True, exist_ok=True)
+            local_url = f"{public_base}/item/{FEED_NAME}/{slug}/" if public_base else link
+            cached_pdf = out_dir / "original.pdf"
+
+            pdf_bytes = None
+            if cached_pdf.exists() and cached_pdf.stat().st_size > 1000:
+                pdf_bytes = cached_pdf.read_bytes()
+                print(f"INFO: reusing cached PDF (no download) for {link}")
+            else:
+                try:
+                    pdf_bytes = fetch_pdf_bytes(link)
+                    cached_pdf.write_bytes(pdf_bytes)
+                except Exception as exc:
+                    print(f"WARN: fetch PDF failed for {link}: {exc}")
+
+            elements, plain = [], []
+            if pdf_bytes:
+                for old in (list(out_dir.glob("fig-*.png")) + list(out_dir.glob("page-*.png"))):
+                    try:
+                        old.unlink()
+                    except Exception:
+                        pass
+                try:
+                    elements, plain = extract_pdf_content(pdf_bytes, out_dir, title=title)
+                except Exception as exc:
+                    print(f"WARN: extraction failed for {link}: {exc}")
+
+            if not description:
+                description = shorten(plain[0] if plain else title)
+
+            reader_body = render_elements(elements, img_prefix="")
+            reader_abs = render_elements(elements, img_prefix=local_url)
+            content_html = reader_abs
+            (out_dir / "index.html").write_text(
+                build_local_page(title, link, "original.pdf" if pdf_bytes else None, reader_body),
+                encoding="utf-8",
+            )
+            final_link = final_guid = local_url
+            is_permalink = True
+            processed_pdfs += 1
+            pdf_count += 1
+            new_or_built += 1
+        elif not description:
+            description = shorten(title)
+
+        if guid not in existing_guid_map:
+            new_or_built += 1
+
+        output_items.append({
+            "title": title,
+            "link": final_link,
+            "guid": final_guid,
+            "pub_date": pub_date,
+            "description": description,
+            "content_html": content_html,
+            "is_permalink": is_permalink,
+        })
+
+    for item in output_items:
+        rss_item = ET.SubElement(channel, "item")
+        ET.SubElement(rss_item, "title").text = item["title"]
+        ET.SubElement(rss_item, "link").text = item["link"]
+        guid_el = ET.SubElement(rss_item, "guid")
+        guid_el.set("isPermaLink", "true" if item["is_permalink"] else "false")
+        guid_el.text = item["guid"]
+        ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
+        ET.SubElement(rss_item, "description").text = item.get("description") or ""
+        if item.get("content_html"):
+            ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
+
+    if new_or_built == 0 and output_path.exists():
+        print(f"no new {FEED_NAME} items; kept existing feed and pages")
+        return
+
+    xml_bytes = minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ", encoding="utf-8")
+    output_path.write_bytes(xml_bytes)
+    print(f"Saved {output_path} (items={len(output_items)}, pdf_built={pdf_count}, budget={MAX_PDFS_PER_RUN}, bootstrap={is_bootstrap})")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python build_dbresearch_pro_feed.py <site_dir> <public_base>")
+        sys.exit(1)
+    site_dir = Path(sys.argv[1])
+    site_dir.mkdir(parents=True, exist_ok=True)
+    build_feed(site_dir, sys.argv[2])
