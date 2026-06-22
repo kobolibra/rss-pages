@@ -46,7 +46,6 @@ def build_blackrock_slug(title: str, pub_date: str, fallback_link: str = "") -> 
 
 
 def build_page(title: str, body_html: str, source_link: str) -> str:
-    # 在本地 item 页正文最前面给出文章原文链接
     source_html = (
         f'<p>原文链接：<a href="{html.escape(source_link)}" target="_blank" rel="noopener">{html.escape(source_link)}</a></p>'
         if source_link
@@ -68,10 +67,10 @@ def build_page(title: str, body_html: str, source_link: str) -> str:
 
 
 def qname_local(tag: str) -> str:
-    # 必须用 Clark 记法 {uri}local。若写成 "http://.../encoded"（无花括号），
-    # el.find() 会把开头的 "http:" 当成带命名空间前缀的 XPath，抛
-    # "prefix 'http' not found in prefix map"——这正是本次真正的崩溃点。
-    return f"{CONTENT_NS}{tag}"
+    # 必须用 Clark 记法 (uri)local；用字符串拼接避免 f-string 双花括号问题。
+    # 若缺花括号，el.find() 会把开头的 http: 当成命名空间前缀，抛
+    # "prefix 'http' not found in prefix map"——这正是真正的崩溃点。
+    return "{" + CONTENT_NS + "}" + tag
 
 
 def html_to_text(value: str) -> str:
@@ -89,8 +88,6 @@ def get_text(el, tag: str) -> str:
 
 
 def _strip_namespaces(elem):
-    # 去掉整棵子树上的命名空间前缀，使其能脱离父节点单独序列化，
-    # 避免 ElementTree 抛 "prefix '...' not found in prefix map"。
     for node in elem.iter():
         if isinstance(node.tag, str):
             if "}" in node.tag:
@@ -110,10 +107,8 @@ def _strip_namespaces(elem):
 
 
 def _serialize_child(child) -> str:
-    # content:encoded 抓回来的子节点可能带有未声明的命名空间前缀，单独序列化
-    # 会抛 "prefix '...' not found in prefix map"。策略：先正常序列化；失败则
-    # 去掉命名空间前缀后重试（保留 HTML 结构）；再失败才降级为纯文本，
-    # 确保整条 feed 的本地化改写不会因为正文里一个坏节点而整体失败被跳过。
+    # content:encoded 子节点可能带未声明的命名空间前缀；先正常序列化，
+    # 失败则去前缀重试，再失败才降级为纯文本，保证不会整条 feed 被跳过。
     try:
         return ET.tostring(child, encoding="unicode", method="xml")
     except Exception:
@@ -129,7 +124,6 @@ def get_content_encoded(el) -> str:
     node = el.find(qname_local("encoded"))
     if node is None:
         return ""
-    # content:encoded 里可能是真正的嵌套 HTML，而不只是纯文本；不能只取 node.text
     parts = []
     if node.text and node.text.strip():
         parts.append(node.text)
@@ -196,14 +190,10 @@ def rewrite_feed(xml_path: Path, site_dir: Path, public_base: str, feed_name: st
         source_content_html = sanitize_feed_html(feed_name, get_content_encoded(item) or desc)
         page_body_html = source_content_html
         if feed_name in SOURCE_LINK_FEEDS:
-            # 这类源希望保留原文链接，feed 不再内嵌正文，交给阅读器抓取原文。
             content_html = ""
         elif feed_name == "blackrock_weekly_commentary":
-            # Barclays/BlackRock 策略同理：feed 内不重复放正文正文；
-            # item page 用原始抓取内容承载正文。
             content_html = ""
         else:
-            # Natixis 在改为原文链接前是本地正文策略；目前转为原文链接后同样去掉内嵌正文。
             content_html = desc if feed_name in SUMMARY_LOCAL_FEEDS else source_content_html
         full_text = html_to_text(content_html)
         if feed_name != "blackrock_weekly_commentary" and len(full_text) > len(desc or ""):
@@ -276,7 +266,7 @@ if __name__ == "__main__":
     site_dir = Path(sys.argv[1])
     public_base = sys.argv[2]
     feed_names = [x.strip() for x in sys.argv[3].split(",") if x.strip()]
-    print("[rewrite_local_item_feeds] active build: clark-qname + ns-safe serialize")
+    print("[rewrite_local_item_feeds] active build: clark-qname-concat + ns-safe serialize")
     for feed_name in feed_names:
         try:
             rewrite_feed(site_dir / f"{feed_name}.xml", site_dir, public_base, feed_name)
