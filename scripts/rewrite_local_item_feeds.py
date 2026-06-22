@@ -68,6 +68,9 @@ def build_page(title: str, body_html: str, source_link: str) -> str:
 
 
 def qname_local(tag: str) -> str:
+    # 必须用 Clark 记法 {uri}local。若写成 "http://.../encoded"（无花括号），
+    # el.find() 会把开头的 "http:" 当成带命名空间前缀的 XPath，抛
+    # "prefix 'http' not found in prefix map"——这正是本次真正的崩溃点。
     return f"{CONTENT_NS}{tag}"
 
 
@@ -273,6 +276,7 @@ if __name__ == "__main__":
     site_dir = Path(sys.argv[1])
     public_base = sys.argv[2]
     feed_names = [x.strip() for x in sys.argv[3].split(",") if x.strip()]
+    print("[rewrite_local_item_feeds] active build: clark-qname + ns-safe serialize")
     for feed_name in feed_names:
         try:
             rewrite_feed(site_dir / f"{feed_name}.xml", site_dir, public_base, feed_name)
