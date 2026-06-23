@@ -74,7 +74,12 @@ jobs:
           fi
 
           python scripts/rewrite_local_item_feeds.py site "$BASE_URL" "pantheonmacro,trivium_finance_regs,blackrock_weekly_commentary,carlyle_insights,pitchbook_reports,yardeni_morning_briefing,natixis_insights"
-          python scripts/build_with_live_fallback.py "$BASE_URL" site dbresearch 1 \
+          # dbresearch is PAUSED (frozen, NOT deleted). DBRESEARCH_MAX_ITEMS=0 stops pulling
+          # any new items from the source feed; build_dbresearch_feed.py then restores the
+          # current live dbresearch.xml + item pages + image assets so the feed stays
+          # published and accessible, just no longer updated. To resume, delete the
+          # DBRESEARCH_MAX_ITEMS=0 prefix on the line below.
+          DBRESEARCH_MAX_ITEMS=0 python scripts/build_with_live_fallback.py "$BASE_URL" site dbresearch 1 \
             python scripts/build_dbresearch_feed.py site "$BASE_URL"
           python scripts/build_with_live_fallback.py "$BASE_URL" site barclays_weekly_insights 1 \
             python scripts/build_barclays_feed.py site "$BASE_URL"
@@ -153,7 +158,7 @@ jobs:
               <li><a href="natixis_insights.xml">Natixis Insights</a></li>
               <li><a href="gsam.xml">gsam</a></li>
               <li><a href="dws_cio.xml">dws_cio</a></li>
-              <li><a href="dbresearch.xml">dbresearch</a></li>
+              <li><a href="dbresearch.xml">dbresearch (paused)</a></li>
               <li><a href="dbresearch_pro.xml">dbresearch_pro (high-fidelity)</a></li>
               <li><a href="citadel_market_insights.xml">citadel_market_insights</a></li>
               <li><a href="blackstone_insights.xml">Blackstone Insights</a></li>
