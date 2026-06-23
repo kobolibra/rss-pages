@@ -15,6 +15,10 @@ plot, so crops don't swallow unrelated text right/below; real sentences
 mentioning Deutsche Bank are kept; label-less cover bylines are lifted into the
 Authors list.
 
+v7: the RSS feed no longer carries content:encoded -- the full body lives only
+on the local high-fidelity page that <link> points to (avoids duplicating the
+whole article in the feed). Items keep title/link/guid/pubDate/description.
+
 Usage: python build_dbresearch_pro_feed.py <site_dir> <public_base>
 """
 import asyncio
@@ -62,7 +66,7 @@ BROWSER_FALLBACK_ENABLED = os.environ.get("DBRESEARCH_PRO_BROWSER_FALLBACK", "1"
 FORCE_REBUILD = os.environ.get("DBRESEARCH_PRO_FORCE_REBUILD", "0") == "1"
 
 # Bump when rendering changes so published pages regenerate (from cached PDF).
-RENDER_VERSION = 9
+RENDER_VERSION = 10
 
 FIG_CAP_RE = re.compile(r"^(figure|chart|exhibit)\s+\d+", re.I)
 SOURCE_RE = re.compile(r"^\s*source\b", re.I)
@@ -818,7 +822,6 @@ def parse_existing_feed(xml_path: Path) -> list:
             "guid": (item.findtext("guid") or "").strip(),
             "pub_date": (item.findtext("pubDate") or "").strip(),
             "description": (item.findtext("description") or "").strip(),
-            "content_html": (item.findtext(CONTENT_ENCODED) or ""),
             "slug": slug,
         })
     return items
@@ -958,15 +961,13 @@ def build_feed(site_dir: Path, public_base: str):
                 "guid": existing_item.get("guid") or guid,
                 "pub_date": existing_item.get("pub_date") or pub_date,
                 "description": existing_item.get("description") or description or shorten(title),
-                "content_html": existing_item.get("content_html") or "",
                 "is_permalink": bool((existing_item.get("link") or "").startswith("http")),
             })
             continue
 
         if is_pdf_url(link) and slug and processed_pdfs >= MAX_PDFS_PER_RUN:
             existing_link = (existing_item.get("link") if existing_item else "") or ""
-            if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")
-                    and existing_item.get("content_html")):
+            if (existing_item and existing_link.startswith(f"{public_base}/item/{FEED_NAME}/")):
                 print(f"INFO: budget reached; keeping published version of {link}")
                 output_items.append({
                     "title": existing_item.get("title") or title,
@@ -974,7 +975,6 @@ def build_feed(site_dir: Path, public_base: str):
                     "guid": existing_item.get("guid") or guid,
                     "pub_date": existing_item.get("pub_date") or pub_date,
                     "description": existing_item.get("description") or description or shorten(title),
-                    "content_html": existing_item.get("content_html") or "",
                     "is_permalink": True,
                 })
             else:
@@ -985,7 +985,6 @@ def build_feed(site_dir: Path, public_base: str):
                     "guid": guid,
                     "pub_date": pub_date,
                     "description": description or shorten(title),
-                    "content_html": "",
                     "is_permalink": bool(guid == link and link.startswith("http")),
                 })
                 new_or_built += 1 if guid not in existing_guid_map else 0
@@ -993,7 +992,6 @@ def build_feed(site_dir: Path, public_base: str):
 
         final_link, final_guid = link, guid
         is_permalink = bool(guid == link and link.startswith("http"))
-        content_html = ""
 
         if is_pdf_url(link) and slug:
             out_dir = item_root / slug
@@ -1028,8 +1026,6 @@ def build_feed(site_dir: Path, public_base: str):
                 description = shorten(plain[0] if plain else title)
 
             reader_body = render_elements(elements, img_prefix="")
-            reader_abs = render_elements(elements, img_prefix=local_url)
-            content_html = reader_abs
             (out_dir / "index.html").write_text(
                 build_local_page(title, link, "original.pdf" if pdf_bytes else None, reader_body),
                 encoding="utf-8",
@@ -1051,7 +1047,6 @@ def build_feed(site_dir: Path, public_base: str):
             "guid": final_guid,
             "pub_date": pub_date,
             "description": description,
-            "content_html": content_html,
             "is_permalink": is_permalink,
         })
 
@@ -1064,8 +1059,8 @@ def build_feed(site_dir: Path, public_base: str):
         guid_el.text = item["guid"]
         ET.SubElement(rss_item, "pubDate").text = item["pub_date"]
         ET.SubElement(rss_item, "description").text = item.get("description") or ""
-        if item.get("content_html"):
-            ET.SubElement(rss_item, CONTENT_ENCODED).text = item["content_html"]
+        # content:encoded intentionally omitted: the <link> points to the local
+        # high-fidelity reader page, so the full body is not duplicated here.
 
     if new_or_built == 0 and output_path.exists():
         print(f"no new {FEED_NAME} items; kept existing feed and pages")
