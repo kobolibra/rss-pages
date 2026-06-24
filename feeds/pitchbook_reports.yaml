@@ -2,6 +2,9 @@ name: "pitchbook_reports"
 version: "1.0"
 source:
   url: "https://pitchbook.com/news/reports"
+  # 强制 jina 跳过服务端缓存，避免抓到广告追踪像素的旧快照导致 matched=0
+  headers:
+    x-no-cache: "true"
 
 # 只抓图文卡片 + 6 条真实文章项
 # 标题优先匹配 image alt 中的首段文本，确保像 Global Distressed Credit Weekly Wrap 这种是第一条
