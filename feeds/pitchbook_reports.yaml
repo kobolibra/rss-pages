@@ -2,9 +2,13 @@ name: "pitchbook_reports"
 version: "1.0"
 source:
   url: "https://pitchbook.com/news/reports"
-  # 强制 jina 跳过服务端缓存，避免抓到广告追踪像素的旧快照导致 matched=0
+  # PitchBook 对 jina 抓取器反爬：默认抓取(含跳缓存)拿到的都是广告追踪像素的 1x1 假页面，导致 matched=0。
+  # 这里改用 jina 无头浏览器渲染真实页面 + 自动代理绕过 IP 级反爬，并继续跳过服务端缓存。
   headers:
     x-no-cache: "true"
+    x-engine: "browser"
+    x-proxy: "auto"
+    x-respond-with: "markdown"
 
 # 只抓图文卡片 + 6 条真实文章项
 # 标题优先匹配 image alt 中的首段文本，确保像 Global Distressed Credit Weekly Wrap 这种是第一条
