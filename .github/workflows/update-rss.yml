@@ -121,6 +121,16 @@ jobs:
             python scripts/build_blackstone_insights_feed.py site "$BASE_URL" \
             || echo "[blackstone] build failed; deploying without it (production feeds unaffected)"
 
+      - name: Build KKR Insights feed (additive, non-fatal)
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SCHEME=https
+          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
+          KKR_MAX_ITEMS="${KKR_MAX_ITEMS:-10}" \
+          KKR_MAX_RENDER_PER_RUN="${KKR_MAX_RENDER_PER_RUN:-6}" \
+            python scripts/build_kkr_insights_feed.py site "$BASE_URL" \
+            || echo "[kkr] build failed; deploying without it (production feeds unaffected)"
+      
       - name: Build experimental dbresearch_pro feed (additive, non-fatal)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
