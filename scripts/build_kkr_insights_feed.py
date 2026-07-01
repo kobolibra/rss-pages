@@ -10,8 +10,7 @@ plain fetch (or Readwise Reader, or jina) sees the caption text 'Exhibit N: ...'
 but NEVER the chart graphic. That is exactly why Readwise Reader cannot capture
 the exhibits.
 
-So we drive a headless browser (Chromium, already installed in the workflow for
-Blackstone) to:
+So we drive a headless browser (Chromium) to:
   1. load each KKR article and wait for the JS charts to render,
   2. SCREENSHOT each exhibit container (PNG), matched to its 'Exhibit N' number,
   3. grab the fully-rendered article HTML for complete body text,
@@ -26,9 +25,7 @@ Output:
 Incremental & self-healing, mirroring the Blackstone builder: restore the
 published feed + item pages from live Pages, reuse already-rendered articles
 (gated by RENDER_VERSION), render only new ones, and rebuild any missing local
-page from content:encoded before deploy so links never 404. The whole step is
-wired as additive / non-fatal in CI, so any failure leaves production feeds
-untouched.
+page from content:encoded before deploy so links never 404.
 
 Usage: python scripts/build_kkr_insights_feed.py <site_dir> <public_base>
 """
@@ -62,8 +59,6 @@ OUTPUT_FILE = os.environ.get("KKR_OUTPUT_FILE", f"{FEED_NAME}.xml")
 FEED_TITLE = os.environ.get("KKR_FEED_TITLE", "KKR Insights")
 FEED_DESC = "KKR Insights articles rendered to local reader-friendly pages with full text and charts."
 MAX_ITEMS = int(os.environ.get("KKR_MAX_ITEMS", "10"))
-# Cap how many NEW articles we browser-render per run so a single run never
-# balloons; remaining new items are picked up incrementally on later runs.
 MAX_RENDER_PER_RUN = int(os.environ.get("KKR_MAX_RENDER_PER_RUN", "6"))
 MAX_FIGS = int(os.environ.get("KKR_MAX_FIGS", "30"))
 NAV_TIMEOUT = int(os.environ.get("KKR_NAV_TIMEOUT", "45"))
@@ -81,7 +76,6 @@ HEADERS = {
 }
 ARTICLE_RE = re.compile(r"https?://www\.kkr\.com/insights/[a-z0-9\-/]+", re.I)
 
-# Bump when rendering changes so published pages regenerate on the next run.
 RENDER_VERSION = 1
 
 INLINE_OK = {"strong", "em", "b", "i", "u", "a", "br", "sup", "sub", "code"}
@@ -94,9 +88,6 @@ DROP = {"script", "style", "noscript", "svg", "canvas", "form", "button",
         "iframe", "input", "select", "textarea", "nav", "aside", "header",
         "footer"}
 
-# --------------------------------------------------------------------------- #
-# Browser-side JS
-# --------------------------------------------------------------------------- #
 AUTOSCROLL_JS = """() => new Promise((resolve) => {
   let total = 0; const step = 700;
   const timer = setInterval(() => {
@@ -106,8 +97,6 @@ AUTOSCROLL_JS = """() => new Promise((resolve) => {
   setTimeout(() => { clearInterval(timer); resolve(); }, 9000);
 })"""
 
-# Find chart graphics in document order, tag each container with data-kkr-idx,
-# and capture its 'Exhibit N' number + caption from nearby text.
 CHART_JS = """() => {
   const root = document.querySelector('article') || document.querySelector('main') || document.body;
   if (!root) return [];
@@ -155,7 +144,6 @@ CHART_JS = """() => {
   return out;
 }"""
 
-# Return the outerHTML of the richest article container (post-JS render).
 CONTENT_JS = """() => {
   const cands = ['article', 'main', '[role=\"main\"]', '.article-body', '.article__body',
                  '.insight-detail', '.insight__body', '.rich-text', '.content', '.body-copy'];
@@ -171,9 +159,6 @@ CONTENT_JS = """() => {
 }"""
 
 
-# --------------------------------------------------------------------------- #
-# Small helpers
-# --------------------------------------------------------------------------- #
 def slugify(value: str) -> str:
     value = html.unescape(value or "")
     value = unquote(value)
@@ -252,9 +237,6 @@ def article_slug(url: str) -> str:
     return f"{base}-{short_hash(url)}"
 
 
-# --------------------------------------------------------------------------- #
-# Rendered HTML -> clean reader HTML
-# --------------------------------------------------------------------------- #
 def img_html(node, base_url):
     src = node.get("src") or node.get("data-src") or ""
     if not src or src.startswith("data:"):
@@ -347,9 +329,6 @@ def inject_charts(body, chart_map, img_prefix):
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Browser render (text HTML + chart screenshots)
-# --------------------------------------------------------------------------- #
 async def _new_context(p):
     browser = await p.chromium.launch(
         headless=True,
@@ -366,16 +345,9 @@ async def _new_context(p):
 
 async def _dismiss_gate(page):
     selectors = [
-        "text=Accept All Cookies",
-        "text=Accept All",
-        "text=Accept all",
-        "text=Accept",
-        "text=I Agree",
-        "text=I agree",
-        "text=Agree",
-        "text=Continue",
-        "text=I Understand",
-        "text=Individual Investor",
+        "text=Accept All Cookies", "text=Accept All", "text=Accept all",
+        "text=Accept", "text=I Agree", "text=I agree", "text=Agree",
+        "text=Continue", "text=I Understand", "text=Individual Investor",
         "text=Institutional Investor",
     ]
     for sel in selectors:
@@ -455,6 +427,16 @@ async def _render_articles(jobs):
     return results
 
 
+def to_iso(value):
+    if not value:
+        return ""
+    try:
+        dt = parsedate_to_datetime(value)
+        return dt.isoformat()
+    except Exception:
+        return value
+
+
 def process_jobs(jobs, meta_by_url):
     if not jobs:
         return {}
@@ -503,19 +485,6 @@ def process_jobs(jobs, meta_by_url):
     return results
 
 
-def to_iso(value):
-    if not value:
-        return ""
-    try:
-        dt = parsedate_to_datetime(value)
-        return dt.isoformat()
-    except Exception:
-        return value
-
-
-# --------------------------------------------------------------------------- #
-# Local page
-# --------------------------------------------------------------------------- #
 PAGE_CSS = """
   body { font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif; margin: 0; color: #1a1a1a; background: #fff; }
   .wrap { max-width: 760px; margin: 0 auto; padding: 28px 18px 72px; line-height: 1.7; }
@@ -572,9 +541,6 @@ def build_local_page(title, source_url, content_html, date_human):
     ])
 
 
-# --------------------------------------------------------------------------- #
-# Incremental state
-# --------------------------------------------------------------------------- #
 def parse_existing_feed(xml_path):
     root = ET.parse(xml_path).getroot()
     channel = root.find("channel")
@@ -702,9 +668,6 @@ def ensure_local_pages(item_root, items):
     return healed
 
 
-# --------------------------------------------------------------------------- #
-# Discovery (politepol source feed -> article URLs)
-# --------------------------------------------------------------------------- #
 def discover_articles(session):
     try:
         r = session.get(SOURCE_FEED_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
@@ -733,9 +696,6 @@ def discover_articles(session):
     return urls, meta
 
 
-# --------------------------------------------------------------------------- #
-# Feed assembly
-# --------------------------------------------------------------------------- #
 def build_feed(site_dir, public_base):
     public_base = public_base.rstrip("/")
     session = requests.Session()
@@ -830,7 +790,6 @@ def build_feed(site_dir, public_base):
             return datetime.now(timezone.utc)
 
     output_items.sort(key=_sort_key, reverse=True)
-
     ensure_local_pages(item_root, output_items)
 
     for item in output_items:
