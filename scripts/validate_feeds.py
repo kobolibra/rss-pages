@@ -145,8 +145,6 @@ trivium_text = (trivium.findtext('description') or '') + ' ' + (trivium.findtext
 if 'appeared first on' in trivium_text.lower():
     fail('Trivium still contains boilerplate footer')
 
-print('VALIDATION OK')
-
 # Citadel: local item-page feed with usable full text on page
 citadel_path = SITE / 'citadel_market_insights.xml'
 if citadel_path.exists():
