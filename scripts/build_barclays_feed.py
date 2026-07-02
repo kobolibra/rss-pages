@@ -1,10 +1,10 @@
 import html
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
-from xml.etree.ElementTree import Element, SubElement, QName, register_namespace
+from xml.etree.ElementTree import Element, SubElement, register_namespace
 
 import requests
 
@@ -91,7 +91,7 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     SubElement(channel, 'title').text = TITLE
     SubElement(channel, 'link').text = f"{public_base.rstrip('/')}/barclays_weekly_insights.xml"
     SubElement(channel, 'description').text = DESCRIPTION
-    SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    SubElement(channel, 'lastBuildDate').text = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'
 
     slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower() or 'barclays-weekly'
@@ -103,7 +103,7 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
     guid = SubElement(item, 'guid')
     guid.set('isPermaLink', 'true')
     guid.text = item_url
-    SubElement(item, 'pubDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    SubElement(item, 'pubDate').text = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(item, 'description').text = desc
 
     return minidom.parseString(ET.tostring(rss, encoding='utf-8')).toprettyxml(indent='  ', encoding='utf-8')
@@ -112,8 +112,10 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
 def build_item_page(title: str, content_html: str) -> str:
     return f"""<!doctype html>
 <html>
-<meta charset="utf-8">
-<head><title>{html.escape(title)}</title></head>
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)}</title>
+</head>
 <body>
   <h1>{html.escape(title)}</h1>
   <p>原文链接：<a href="{html.escape(URL)}" target="_blank" rel="noopener">{html.escape(URL)}</a></p>
