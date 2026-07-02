@@ -108,7 +108,7 @@ jobs:
             python scripts/validate_feeds.py site
           fi
 
-      - name: Install Chromium for Blackstone (non-fatal)
+      - name: Install Chromium (Blackstone + KKR, non-fatal)
         run: |
           python -m playwright install --with-deps chromium || python -m playwright install chromium || echo "[blackstone] chromium install failed; will fall back to requests"
 
@@ -130,7 +130,7 @@ jobs:
           KKR_MAX_RENDER_PER_RUN="${KKR_MAX_RENDER_PER_RUN:-6}" \
             python scripts/build_kkr_insights_feed.py site "$BASE_URL" \
             || echo "[kkr] build failed; deploying without it (production feeds unaffected)"
-      
+
       - name: Build experimental dbresearch_pro feed (additive, non-fatal)
         run: |
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
