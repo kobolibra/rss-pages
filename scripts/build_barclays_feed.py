@@ -15,6 +15,18 @@ URL = "https://www.ib.barclays/our-insights/weekly-insights.html"
 TITLE = "Barclays Weekly Insights"
 DESCRIPTION = "Barclays Investment Bank analyses key macroeconomic developments and prepares readers for related data and events in the week ahead."
 
+ITEM_STYLE = """    body { font-family: Georgia, "Times New Roman", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; }
+    article { width:100%; }
+    h1 { line-height:1.2; margin:0 0 10px; font-size:2rem; }
+    h2 { margin-top:1.8rem; line-height:1.25; }
+    h3 { margin-top:1.4rem; line-height:1.3; }
+    h4 { margin-top:1.2rem; line-height:1.3; }
+    p { margin:0 0 1.1rem; }
+    ul { padding-left:1.35rem; margin:1.1rem 0; }
+    li { margin:0 0 .75rem; }
+    a { color:#0b57d0; }
+    .source { color:#666; font-size:.95rem; margin:0 0 24px; }"""
+
 
 def fetch_page() -> str:
     r = requests.get("https://r.jina.ai/http://www.ib.barclays/our-insights/weekly-insights.html", timeout=30, headers={"User-Agent": "Mozilla/5.0"})
@@ -22,12 +34,43 @@ def fetch_page() -> str:
     return r.text
 
 
+def render_inline(text: str) -> str:
+    text = html.escape(text)
+    text = re.sub(
+        r'\[([^\]]+)\]\((https?://[^)\s]+)[^)]*\)',
+        lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>',
+        text,
+    )
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    return text
+
+
+def render_list_item(item: str) -> str:
+    item = re.sub(r'\s+', ' ', item).strip()
+    m = re.match(r'^\*\*(.+?)\*\*\s*:\s*(.*)$', item)
+    if m:
+        label = html.escape(m.group(1).strip())
+        rest = render_inline(m.group(2).strip())
+        return f'<strong>{label}:</strong> {rest}'.strip()
+    m = re.match(r'^\*\*(.+?:)\*\*\s*(.*)$', item)
+    if m:
+        label = html.escape(m.group(1).strip())
+        rest = render_inline(m.group(2).strip())
+        return f'<strong>{label}</strong> {rest}'.strip()
+    m = re.match(r'^\*\*(.+?)\*\*\s*(.*)$', item)
+    if m:
+        label = html.escape(m.group(1).strip())
+        rest = render_inline(m.group(2).strip())
+        return f'<strong>{label}</strong> {rest}'.strip()
+    return render_inline(item)
+
+
 def extract_latest(markdown_text: str):
     text = markdown_text.replace('\r', '')
     if 'Markdown Content:' in text:
         text = text.split('Markdown Content:', 1)[1]
 
-    # The page now includes noisy site chrome (notably `## Search`) before the real weekly article.
+    # The page includes noisy site chrome (notably `## Search`) before the real weekly article.
     # We anchor on `### Get the latest report`, then walk backwards to the nearest valid
     # `## ...` heading before it; on the current page shape this yields the true weekly title.
     report_marker = re.search(r'(?m)^###\s+Get the latest report\s*$', text)
@@ -52,37 +95,59 @@ def extract_latest(markdown_text: str):
     title = re.sub(r'\s+', ' ', title_match.group(1)).strip()
     body = text[title_match.end():report_marker.start()].strip()
 
-    raw_blocks = [b.strip() for b in re.split(r'\n\n+', body) if b.strip()]
-    blocks = []
-    for block in raw_blocks:
-        if re.fullmatch(r'Parsys\s+\d+', block):
-            continue
-        clean = re.sub(r'\s+', ' ', block).strip().replace('&nbsp;', ' ')
-        if not clean:
-            continue
-        blocks.append(clean)
+    html_parts: list[str] = []
+    list_buffer: list[str] = []
+    para_buffer: list[str] = []
+    desc = ''
 
-    if not blocks:
+    def flush_list():
+        if list_buffer:
+            html_parts.append('<ul>' + ''.join(f'<li>{li}</li>' for li in list_buffer) + '</ul>')
+            list_buffer.clear()
+
+    def flush_para():
+        nonlocal desc
+        if para_buffer:
+            paragraph = re.sub(r'\s+', ' ', ' '.join(para_buffer)).strip().replace('&nbsp;', ' ')
+            if paragraph:
+                html_parts.append(f'<p>{render_inline(paragraph)}</p>')
+                if not desc:
+                    desc = re.sub(r'\*\*(.+?)\*\*', r'\1', paragraph)
+            para_buffer.clear()
+
+    for raw in body.split('\n'):
+        line = raw.strip().replace('&nbsp;', ' ')
+        if not line:
+            flush_para()
+            flush_list()
+            continue
+        if re.fullmatch(r'Parsys\s+\d+', line):
+            continue
+        hm = re.match(r'^(#{1,6})\s+(.*)$', line)
+        if hm:
+            flush_para()
+            flush_list()
+            level = min(len(hm.group(1)) + 1, 6)
+            html_parts.append(f'<h{level}>{render_inline(hm.group(2).strip())}</h{level}>')
+            continue
+        lm = re.match(r'^[\*\-]\s+(.*)$', line)
+        if lm:
+            flush_para()
+            list_buffer.append(render_list_item(lm.group(1)))
+            continue
+        para_buffer.append(line)
+
+    flush_para()
+    flush_list()
+
+    if not html_parts:
         raise RuntimeError("Could not parse Barclays weekly insights body")
 
-    intro = blocks[0]
+    if not desc:
+        desc = title
 
-    html_parts = []
-    for block in blocks:
-        m = re.match(r'^\*\s+\*\*(.+?)\*\*:\s*(.*)$', block)
-        if m:
-            label = re.sub(r'\s+', ' ', m.group(1)).strip()
-            rest = re.sub(r'\s+', ' ', m.group(2)).strip()
-            if rest:
-                html_parts.append(f'<p><strong>{html.escape(label)}:</strong> {html.escape(rest)}</p>')
-            else:
-                html_parts.append(f'<p><strong>{html.escape(label)}:</strong></p>')
-        else:
-            html_parts.append(f'<p>{html.escape(block)}</p>')
-
-    html_block = ''.join(html_parts)
-    desc = intro
-    return title, desc, html_block
+    content_html = ''.join(html_parts)
+    return title, desc, content_html
 
 
 def build_xml(title: str, desc: str, content_html: str, public_base: str) -> bytes:
@@ -111,15 +176,21 @@ def build_xml(title: str, desc: str, content_html: str, public_base: str) -> byt
 
 def build_item_page(title: str, content_html: str) -> str:
     return f"""<!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
+  <style>
+{ITEM_STYLE}
+  </style>
 </head>
 <body>
-  <h1>{html.escape(title)}</h1>
-  <p>原文链接：<a href="{html.escape(URL)}" target="_blank" rel="noopener">{html.escape(URL)}</a></p>
-  <div>{content_html}</div>
+  <article>
+    <h1>{html.escape(title)}</h1>
+    <p class="source">原文链接：<a href="{html.escape(URL)}" target="_blank" rel="noopener">{html.escape(URL)}</a></p>
+    {content_html}
+  </article>
 </body>
 </html>
 """
