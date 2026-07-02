@@ -331,7 +331,7 @@ def build_xml(items: list[dict], public_base: str) -> bytes:
     SubElement(channel, 'title').text = FEED_TITLE
     SubElement(channel, 'link').text = f"{public_base.rstrip('/')}/{FEED_NAME}.xml"
     SubElement(channel, 'description').text = FEED_DESC
-    SubElement(channel, 'lastBuildDate').text = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'
 
     for item in items:
