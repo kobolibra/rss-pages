@@ -16,9 +16,11 @@ local pages + a local feed.
 
 ## What it produces
 
-- `site/blackstone_insights.xml` — RSS feed whose items link to local pages and
-  also carry the full article in `<content:encoded>` (so readers get real,
-  extractable text without parsing the page themselves).
+- `site/blackstone_insights.xml` — RSS feed whose items link to the local reader
+  page and carry a short summary in `<description>`. To keep the feed
+  lightweight, the full article body is **not** embedded in `<content:encoded>`;
+  the complete article (with charts) lives on the local item page that each item
+  links to.
 - `site/item/blackstone_insights/<slug>/index.html` — one clean semantic page
   per article: headings, paragraphs, lists, tables, and inline `<img>` charts
   (images use absolute Blackstone URLs), plus a “View on Blackstone” button.
