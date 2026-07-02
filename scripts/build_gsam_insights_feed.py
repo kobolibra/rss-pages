@@ -291,23 +291,23 @@ def build_item_page(item: dict, page_url: str, article: dict) -> str:
   <title>{html.escape(title)}</title>
   <link rel=\"canonical\" href=\"{html.escape(page_url)}\">
   <style>
-    body {{ font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; }}
-    article {{ width:100%; }}
-    h1 {{ line-height:1.15; margin:0 0 14px; font-size:2.2rem; }}
-    h2 {{ margin-top:2rem; line-height:1.25; }}
-    h3 {{ margin-top:1.5rem; line-height:1.25; }}
-    .meta {{ color:#666; font-size:.95rem; margin:0 0 10px; }}
-    .authors {{ color:#333; font-size:1rem; margin:0 0 20px; }}
-    .summary {{ font-size:1.12rem; margin:1.1rem 0 1.4rem; }}
-    img {{ max-width:100%; height:auto; display:block; }}
-    figure {{ margin:1.5rem 0; }}
-    figcaption {{ color:#555; font-size:.92rem; margin-top:.55rem; }}
-    blockquote {{ border-left:4px solid #ddd; margin:1.4rem 0; padding:.2rem 0 .2rem 1rem; color:#333; }}
-    ul {{ padding-left:1.3rem; }}
-    .paragraph-card {{ margin:1.2rem 0 1.8rem; }}
-    .paragraph-card figure {{ margin:.6rem 0; max-width:72px; }}
-    .paragraph-card h3 {{ margin:.4rem 0 .45rem; font-size:1.08rem; }}
-    a {{ color:#0b57d0; }}
+    body  font-family: Georgia, \"Times New Roman\", serif; color:#111; background:#fff; max-width:820px; margin:40px auto; padding:0 18px; line-height:1.7; 
+    article  width:100%; 
+    h1  line-height:1.15; margin:0 0 14px; font-size:2.2rem; 
+    h2  margin-top:2rem; line-height:1.25; 
+    h3  margin-top:1.5rem; line-height:1.25; 
+    .meta  color:#666; font-size:.95rem; margin:0 0 10px; 
+    .authors  color:#333; font-size:1rem; margin:0 0 20px; 
+    .summary  font-size:1.12rem; margin:1.1rem 0 1.4rem; 
+    img  max-width:100%; height:auto; display:block; 
+    figure  margin:1.5rem 0; 
+    figcaption  color:#555; font-size:.92rem; margin-top:.55rem; 
+    blockquote  border-left:4px solid #ddd; margin:1.4rem 0; padding:.2rem 0 .2rem 1rem; color:#333; 
+    ul  padding-left:1.3rem; 
+    .paragraph-card  margin:1.2rem 0 1.8rem; 
+    .paragraph-card figure  margin:.6rem 0; max-width:72px; 
+    .paragraph-card h3  margin:.4rem 0 .45rem; font-size:1.08rem; 
+    a  color:#0b57d0; 
   </style>
 </head>
 <body>
@@ -331,7 +331,7 @@ def build_xml(items: list[dict], public_base: str) -> bytes:
     SubElement(channel, 'title').text = FEED_TITLE
     SubElement(channel, 'link').text = f"{public_base.rstrip('/')}/{FEED_NAME}.xml"
     SubElement(channel, 'description').text = FEED_DESC
-    SubElement(channel, 'lastBuildDate').text = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    SubElement(channel, 'lastBuildDate').text = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
     SubElement(channel, 'generator').text = 'GitHub Pages RSS rewrite'
 
     for item in items:
