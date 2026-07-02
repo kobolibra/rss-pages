@@ -37,12 +37,12 @@ def slugify(value: str) -> str:
 
 def parse_iso(dt: str) -> str:
     if not dt:
-        return datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+        return datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     try:
         z = dt.replace('Z', '+00:00')
         parsed = datetime.fromisoformat(z)
     except Exception:
-        parsed = datetime.now(timezone.utc)
+        parsed = datetime.utcnow()
     return parsed.astimezone(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
 
 
