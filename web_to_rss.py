@@ -335,8 +335,8 @@ class WebToRSS:
 
         title = m_title.group(1).strip() if m_title else ''
         title = re.sub(r'[*_\s]+$', '', title).strip()
-        if not title:
-            raise ValueError('blackrock_weekly title not found')
+        # if not title:
+        #    raise ValueError('blackrock_weekly title not found')
 
         pdf_link = ''
         if video_compact:
@@ -388,6 +388,10 @@ class WebToRSS:
         meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
         if meta_title and (meta_title.get('content') or '').strip():
             title = (meta_title.get('content') or '').strip()
+
+        if not title:
+            raise ValueError('blackrock_weekly title not found')
+    
         meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
 
         body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
