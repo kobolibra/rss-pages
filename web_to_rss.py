@@ -323,104 +323,22 @@ class WebToRSS:
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
-    def _extract_blackrock_weekly_text_fallback(
-        self, raw: str, title: str, pdf_link: str, date_str: str
-    ) -> Dict[str, str]:
-        """Fallback: extract content from text/HTML response when Body Tabs not found."""
-        content_parts: List[str] = []
-        content_parts.append(f'<p><strong>{html.escape(title)}</strong></p>')
-
-        # If raw looks like HTML, extract text via BeautifulSoup; otherwise treat as plain text
-        has_html_tags = bool(re.search(r'<(html|body|div|p|span|h[1-6])\b', raw, re.I))
-        if has_html_tags:
-            # Extract text from HTML, preserving paragraph structure
-            try:
-                soup = BeautifulSoup(raw, 'html.parser')
-                body = soup.find('body') or soup
-                for elem in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li']):
-                    text = re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
-                    if not text:
-                        continue
-                    if elem.name in ('h1', 'h2', 'h3', 'h4'):
-                        content_parts.append(f'<p><strong>{html.escape(text)}</strong></p>')
-                    else:
-                        content_parts.append(f'<p>{html.escape(text)}</p>')
-                # Also extract images
-                for img in body.find_all('img'):
-                    src = (img.get('data-src') or img.get('src') or '').strip()
-                    if src:
-                        if src.startswith('/'):
-                            src = 'https://www.blackrock.com' + src
-                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
-            except Exception:
-                pass
-        else:
-            lines = raw.split('\n')
-            in_body = False
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                # Skip known metadata / header lines
-                if line.startswith('Weekly video_') or line.startswith('Title slide:'):
-                    continue
-                if line.startswith('[Download full commentary') or line.startswith('!['):
-                    continue
-                if 'BLACKROCK INVESTMENT INSTITUTE' in line:
-                    continue
-                if line in ('Weekly commentary', 'Transcript', 'Market take'):
-                    in_body = True
-                    continue
-                if not in_body:
-                    if line.startswith('Opening frame:') or line.startswith('Camera frame') or len(line) > 60:
-                        in_body = True
-                    else:
-                        continue
-                if line.startswith('Opening frame:') or line.startswith('Camera frame'):
-                    continue
-                # Section headers (all-caps, relatively short)
-                if line.isupper() and len(line) < 80:
-                    content_parts.append(f'<p><strong>{html.escape(line)}</strong></p>')
-                    continue
-                # Bullet points
-                if line.startswith('•') or line.startswith('- '):
-                    text = line.lstrip('•- ').strip()
-                    if text:
-                        content_parts.append(f'<p>{html.escape(text)}</p>')
-                    continue
-                # Regular paragraph
-                if len(line) > 15:
-                    content_parts.append(f'<p>{html.escape(line)}</p>')
-
-        if len(content_parts) <= 1:
-            content_parts.append(f'<p>{html.escape(title)}</p>')
-
-        content_html = ''.join(content_parts)
-        description = title
-        guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
-        return {
-            'title': title,
-            'link': pdf_link,
-            'description': description,
-            'content_html': content_html,
-            'date_str': date_str,
-            'guid': guid,
-        }
-
     def _extract_blackrock_weekly(self, html_text: str) -> Dict[str, str]:
+        """Parse BlackRock Weekly Commentary page (Astro-based structure, 2026)."""
         raw = self._normalize_text(html_text)
 
+        # --- Phase 1: extract title, date, PDF link from raw text ---
         m_video_date = re.search(r'Weekly video_(\d{8})', raw)
         video_compact = m_video_date.group(1) if m_video_date else ''
 
+        title = ''
+        # Try jina.ai text patterns first
         m_title = re.search(r'Title slide:\s*([^\n]+)', raw)
         if not m_title:
             m_title = re.search(r'\n([A-Z][^\n]{8,120})\n\n(?:To view this video|Transcript|Weekly video_)', raw)
-
-        title = m_title.group(1).strip() if m_title else ''
-        title = re.sub(r'[*_\s]+$', '', title).strip()
-        # if not title:
-        #    raise ValueError('blackrock_weekly title not found')
+        if m_title:
+            title = m_title.group(1).strip()
+            title = re.sub(r'[*_\s]+$', '', title).strip()
 
         pdf_link = ''
         if video_compact:
@@ -462,8 +380,7 @@ class WebToRSS:
             m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
             date_str = m_date.group(1).strip() if m_date else ''
 
-        # Use html_text for BeautifulSoup parsing (avoid redundant request --
-        # _fetch_html with prefer_raw=True already returned raw HTML or jina.ai text).
+        # --- Phase 2: parse HTML for structured content ---
         soup = BeautifulSoup(html_text, 'html.parser')
         # If html_text is not HTML (jina.ai fallback), try direct request
         if not soup.find('html') and not soup.find('body') and not soup.find('div'):
@@ -477,79 +394,8 @@ class WebToRSS:
             except Exception:
                 pass
 
-        meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
-        if meta_title and (meta_title.get('content') or '').strip():
-            title = (meta_title.get('content') or '').strip()
-
-        if not title:
-            raise ValueError('blackrock_weekly title not found')
-    
-        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
-
-        body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
-        if not body_tabs:
-            # Page structure changed: fall back to text-based content extraction
-            return self._extract_blackrock_weekly_text_fallback(raw, title, pdf_link, date_str)
-        tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
-        tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
-        wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
-        siblings = []
-        if wrap and tab0_items:
-            for sib in wrap.find_next_siblings('div', class_='ls-cmp-wrap'):
-                comp = sib.find(attrs={'data-componentname': True})
-                comp_name = (comp.get('data-componentname') or '').strip().lower() if comp else ''
-                if comp_name in {'paragraph', 'image'}:
-                    siblings.append(sib)
-                if len(siblings) >= len(tab0_items):
-                    break
-        if not siblings:
-            raise ValueError('blackrock_weekly body components not found')
-
         content_parts: List[str] = []
-        description = (meta_summary.get('content') or '').strip() if meta_summary else ''
-
-        hero_bullets = []
-        hero_titles_seen = set()
-        week_ahead_seen_in_hero = False
-        for bullet in soup.select('div.key-points div.bullet'):
-            title_el = bullet.select_one('div.bullet-title span')
-            body_el = bullet.select_one('div.bullet-summary p')
-            btitle = re.sub(r'\s+', ' ', title_el.get_text(' ', strip=True)).strip() if title_el else ''
-            bbody = re.sub(r'\s+', ' ', body_el.get_text(' ', strip=True)).strip() if body_el else ''
-            if btitle or bbody:
-                hero_bullets.append((btitle, bbody))
-                if btitle:
-                    hero_titles_seen.add(btitle.lower())
-                    if btitle.lower() == 'week ahead':
-                        week_ahead_seen_in_hero = True
-
-        intro_text = ''
-        download_cta = soup.find('a', attrs={'aria-label': re.compile(r'Download full commentary', re.I)})
-        if not download_cta:
-            download_cta = soup.find('a', string=re.compile(r'Download full commentary', re.I))
-        if download_cta:
-            para_wrap = download_cta.find_parent('div', class_=re.compile(r'para-content', re.I))
-            if para_wrap:
-                for p in para_wrap.find_all('p'):
-                    text = re.sub(r'\s+', ' ', p.get_text(' ', strip=True)).strip()
-                    if not text:
-                        continue
-                    if 'Download full commentary' in text:
-                        continue
-                    intro_text = text
-                    break
-
-        seed_blocks = []
-        seed_blocks.append((f'<p><strong>{html.escape(title)}</strong></p>', title))
-        for bullet_title, bullet_text in hero_bullets[:3]:
-            if bullet_title:
-                seed_blocks.append((f'<p><strong>{html.escape(bullet_title)}</strong></p>', bullet_title))
-            if bullet_text:
-                seed_blocks.append((f'<p>{html.escape(bullet_text)}</p>', bullet_text))
-        if intro_text:
-            seed_blocks.append((f'<p>{html.escape(intro_text)}</p>', intro_text))
-            description = intro_text
-
+        description = ''
         seen_norm = set()
 
         def _push_html(block_html: str, text_for_key: str = '', force: bool = False):
@@ -561,132 +407,359 @@ class WebToRSS:
             seen_norm.add(key)
             content_parts.append(block_html)
 
-        content_parts = []
-        for block_html, key in seed_blocks:
-            _push_html(block_html, key)
-
-        def _is_chart_label(elem, text: str) -> bool:
-            if elem.name != 'p':
-                return False
-            if elem.find('span', class_=re.compile(r'text-sm', re.I)):
-                return True
-            low = text.lower()
-            if 'share of energy imports' in low and 'energy import dependence' in low:
-                return True
-            return False
-
-        def _append_image(img_tag):
+        def _img_src(img_tag) -> str:
             if not img_tag:
-                return
+                return ''
             src = (img_tag.get('data-src') or img_tag.get('src') or '').strip()
             if not src:
-                return
+                return ''
             if src.startswith('/'):
                 src = 'https://www.blackrock.com' + src
-            _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+            return src
 
-        deferred_blocks = []
+        def _text(elem) -> str:
+            return re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
+
+        # --- Find all components in order ---
+        all_comps = soup.find_all(attrs={'data-componentname': True})
+        if not all_comps:
+            # Fallback: no Astro components; try old Body Tabs or raw text
+            body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
+            if body_tabs:
+                return self._extract_blackrock_body_tabs(soup, body_tabs, title, pdf_link, date_str, raw)
+            return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
+
+        # --- Extract title from Article Banner or meta ---
+        meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
+        if meta_title and (meta_title.get('content') or '').strip():
+            title = (meta_title.get('content') or '').strip()
+
+        # Also try Article Banner component
+        banner = soup.find(attrs={'data-componentname': 'Article Banner'})
+        banner_date = ''
+        if banner:
+            banner_text = banner.get_text(' ', strip=True)
+            # Extract date from banner: "Title Aug 3, 2026 | BlackRock..."
+            m_bd = re.search(r'([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})', banner_text)
+            if m_bd and not date_str:
+                banner_date = m_bd.group(1)
+                try:
+                    date_str = datetime.strptime(banner_date, '%b %d, %Y').strftime('%b %d, %Y')
+                except Exception:
+                    pass
+
+        if not title:
+            # Try h1 in the first Basic Text or Heading
+            first_h = soup.find('h1') or (banner.find('h1') if banner else None)
+            if first_h:
+                title = _text(first_h)
+        if not title:
+            raise ValueError('blackrock_weekly title not found')
+
+        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
+        if meta_summary and (meta_summary.get('content') or '').strip():
+            description = (meta_summary.get('content') or '').strip()
+
+        # --- Walk components: extract article content only ---
+        seen_article = False  # True after we pass Article Banner
+        stopped = False
+
+        SKIP_COMPONENTS = {
+            'navigation', 'investor attestation', 'exit modal',
+            'video player', 'expandable content', 'disclaimer',
+            'mid-page banner', 'eloqua component',
+        }
+        BOUNDARY_TEXTS = [
+            'read our past weekly market commentaries',
+            'intersecting mega forces',
+            'big calls',
+            'tactical granular views',
+            'meet the authors',
+            'on the go?',
+        ]
+
+        for comp in all_comps:
+            if stopped:
+                break
+            comp_name = (comp.get('data-componentname') or '').strip()
+            comp_lower = comp_name.lower()
+
+            if comp_name == 'Article Banner':
+                seen_article = True
+                continue
+
+            if not seen_article:
+                continue
+
+            if comp_lower in SKIP_COMPONENTS:
+                continue
+
+            comp_text = _text(comp).lower()
+
+            # Check boundary
+            if any(b in comp_text for b in BOUNDARY_TEXTS):
+                if comp_lower == 'basic text':
+                    # Only stop if it's the boundary text, not just any mention
+                    if 'read our past weekly market commentaries' in comp_text:
+                        stopped = True
+                        continue
+                    if 'intersecting mega forces' in comp_text and 'since we launched' in comp_text:
+                        stopped = True
+                        continue
+                    if 'big calls' in comp_text or 'tactical granular views' in comp_text:
+                        stopped = True
+                        continue
+                if comp_lower == 'heading + subheading':
+                    if 'meet the authors' in comp_text or 'on the go?' in comp_text:
+                        stopped = True
+                        continue
+
+            # --- Component-specific extraction ---
+            if comp_lower == 'basic text':
+                # Extract h2/h3 headings and paragraphs in order
+                for elem in comp.find_all(['h2', 'h3', 'p', 'img']):
+                    if elem.name == 'img':
+                        src = _img_src(elem)
+                        if src and 'marketing-service/font' not in src:
+                            _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+                        continue
+                    if elem.name in ('h2', 'h3'):
+                        # Use no-space join to avoid "Week ahea d" from inline <strong> tags
+                        text = re.sub(r'\s+', ' ', elem.get_text('', strip=True)).strip()
+                        if not text:
+                            continue
+                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=True)
+                    else:
+                        text = _text(elem)
+                        if not text:
+                            continue
+                        # If a <p> contains only a <strong> with short text, render as bold heading
+                        strong = elem.find('strong')
+                        if strong and len(text) < 80:
+                            strong_text = _text(strong)
+                            if strong_text and len(strong_text) >= len(text) * 0.7:
+                                _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=True)
+                                continue
+                        _push_html(f'<p>{html.escape(text)}</p>', text)
+                        if not description and len(text) > 80:
+                            description = text
+
+            elif comp_lower == 'button block':
+                # Extract PDF link from componentprops JSON
+                try:
+                    props_tag = comp.find('walrus-render-on-client')
+                    if props_tag:
+                        props_str = props_tag.get('componentprops', '')
+                        m_href = re.search(r'"hrefPrimary"\s*:\s*"([^"]+)"', props_str)
+                        if m_href:
+                            href = m_href.group(1)
+                            if href.startswith('/'):
+                                href = 'https://www.blackrock.com' + href
+                            if href:
+                                pdf_link = href
+                except Exception:
+                    pass
+                # Add download link
+                _push_html(
+                    f'<p><a href="{html.escape(pdf_link)}" target="_blank" rel="noopener">Download full commentary (PDF)</a></p>',
+                    'download full commentary',
+                    force=True,
+                )
+
+            elif comp_lower in ('chart & table', 'chart &amp; table'):
+                # Extract image(s) and source text
+                for img in comp.find_all('img'):
+                    src = _img_src(img)
+                    if src and 'marketing-service/font' not in src:
+                        _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+                # Source text (from oneds-source div)
+                source_div = comp.find('div', class_=re.compile(r'oneds-source'))
+                if source_div:
+                    source_text = _text(source_div)
+                    if source_text:
+                        _push_html(f'<p><em>{html.escape(source_text)}</em></p>', source_text[:80])
+
+            elif comp_lower == 'heading + subheading':
+                heading = comp.find(['h2', 'h3', 'h4'])
+                if heading:
+                    heading_text = re.sub(r'\s+', ' ', heading.get_text('', strip=True)).strip()
+                    if heading_text:
+                        _push_html(f'<p><strong>{html.escape(heading_text)}</strong></p>', heading_text, force=True)
+                # Body paragraphs
+                intro_div = comp.find('div', class_='headline-intro')
+                if intro_div:
+                    for p in intro_div.find_all('p', recursive=False):
+                        text = _text(p)
+                        if text:
+                            _push_html(f'<p>{html.escape(text)}</p>', text)
+                            if not description and len(text) > 80:
+                                description = text
+                else:
+                    for p in comp.find_all('p'):
+                        text = _text(p)
+                        if text:
+                            _push_html(f'<p>{html.escape(text)}</p>', text)
+
+            elif comp_lower == 'simple image':
+                for img in comp.find_all('img'):
+                    src = _img_src(img)
+                    if src and 'marketing-service/font' not in src:
+                        _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+
+        if not content_parts:
+            # Fallback to raw text extraction
+            return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
+
+        content_html = ''.join(content_parts)
+        if not description:
+            description = title
+        guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
+        return {
+            'title': title,
+            'link': pdf_link,
+            'description': description,
+            'content_html': content_html,
+            'date_str': date_str,
+            'guid': guid,
+        }
+
+    def _extract_blackrock_body_tabs(self, soup, body_tabs, title: str, pdf_link: str, date_str: str, raw: str) -> Dict[str, str]:
+        """Legacy: extract content from old AEM Body Tabs structure (pre-2026)."""
+        content_parts: List[str] = []
+        description = ''
+        seen_norm = set()
+
+        def _push_html(block_html: str, text_for_key: str = '', force: bool = False):
+            key = re.sub(r'\s+', ' ', html.unescape(text_for_key or block_html)).strip().lower()
+            if not key:
+                return
+            if (not force) and key in seen_norm:
+                return
+            seen_norm.add(key)
+            content_parts.append(block_html)
+
+        _push_html(f'<p><strong>{html.escape(title)}</strong></p>', title)
+
+        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
+        if meta_summary and (meta_summary.get('content') or '').strip():
+            description = (meta_summary.get('content') or '').strip()
+
+        tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
+        tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
+        wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
+        siblings = []
+        if wrap and tab0_items:
+            for sib in wrap.find_next_siblings('div', class_='ls-cmp-wrap'):
+                sub = sib.find(attrs={'data-componentname': True})
+                sub_name = (sub.get('data-componentname') or '').strip().lower() if sub else ''
+                if sub_name in {'paragraph', 'image'}:
+                    siblings.append(sib)
+                if len(siblings) >= len(tab0_items):
+                    break
+        if not siblings:
+            return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
 
         for sib in siblings:
-            comp = sib.find(attrs={'data-componentname': True})
-            comp_name = (comp.get('data-componentname') or '').strip() if comp else ''
+            sub = sib.find(attrs={'data-componentname': True})
+            sub_name = (sub.get('data-componentname') or '').strip().lower() if sub else ''
             sib_text = re.sub(r'\s+', ' ', sib.get_text(' ', strip=True)).strip().lower()
             if sib_text.startswith('read our past weekly market commentaries'):
                 break
             if 'big calls' in sib_text or 'tactical granular views' in sib_text:
                 break
 
-            if comp_name.lower() == 'paragraph':
+            if sub_name == 'paragraph':
                 for elem in sib.find_all(['h2', 'p', 'img']):
                     if elem.name == 'img':
-                        _append_image(elem)
-                        continue
-                    if 'footnotes' in ((elem.get('class') or [])):
-                        continue
-                    text = elem.get_text(' ', strip=True)
-                    text = re.sub(r'\s+', ' ', text).strip()
-                    if not text:
-                        continue
-                    if _is_chart_label(elem, text):
-                        label_span = elem.find('span', class_=re.compile(r'text-sm', re.I)) if elem.name == 'p' else None
-                        label_text = re.sub(r'\s+', ' ', label_span.get_text(' ', strip=True)).strip() if label_span else ''
-                        if label_text:
-                            _push_html(f'<p><strong>{html.escape(label_text)}</strong></p>', label_text)
-                            rest = text.replace(label_text, '', 1).strip(' :-–—')
-                            if rest:
-                                _push_html(f'<p>{html.escape(rest)}</p>', rest)
-                        elif 'share of energy imports' in text.lower() and 'energy import dependence' in text.lower():
-                            _push_html(f'<p>{html.escape(text)}</p>', text)
-                        continue
-                    if text.lower().startswith('read our past weekly market'):
-                        continue
-                    if text.startswith('Source:') or text.startswith('Sources:'):
-                        continue
-                    if text.startswith('Past performance is not a reliable indicator'):
-                        continue
-                    if elem.name == 'h2':
-                        force_heading = text.lower() in hero_titles_seen
-                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=force_heading)
-                    else:
-                        if not description and len(text) > 120:
-                            description = text
-                        _push_html(f'<p>{html.escape(text)}</p>', text)
-            elif comp_name.lower() == 'image':
-                local_blocks = []
-                img = sib.find('img')
-                if img:
-                    src = (img.get('data-src') or img.get('src') or '').strip()
-                    if src:
-                        if src.startswith('/'):
-                            src = 'https://www.blackrock.com' + src
-                        local_blocks.append((f'<p><img src="{html.escape(src)}" alt="" /></p>', src, False))
-                heading = sib.find('h2')
-                heading_text = ''
-                if heading:
-                    heading_text = re.sub(r'\s+', ' ', heading.get_text(' ', strip=True)).strip()
-                    if heading_text:
-                        local_blocks.append((f'<p><strong>{html.escape(heading_text)}</strong></p>', heading_text, heading_text.lower() in hero_titles_seen))
-                seen_local_week_items = set()
-                for elem in sib.find_all(['span', 'p']):
-                    classes = ' '.join(elem.get('class') or [])
-                    if 'fa ' in classes or classes.startswith('fa') or 'pseudo-mask' in classes:
-                        continue
-                    if 'footnotes' in classes:
+                        src = (elem.get('data-src') or elem.get('src') or '').strip()
+                        if src:
+                            if src.startswith('/'):
+                                src = 'https://www.blackrock.com' + src
+                            _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
                         continue
                     text = re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
                     if not text:
                         continue
                     if text.startswith('Source:') or text.startswith('Sources:'):
                         continue
-                    if text.startswith('Past performance is not a reliable indicator'):
+                    if text.startswith('Past performance'):
                         continue
-                    if heading_text.lower() == 'week ahead' and week_ahead_seen_in_hero:
-                        if re.fullmatch(r'April\s+\d{1,2}(?:-\d{1,2})?', text) or ';' in text or 'U.S.' in text or 'China ' in text:
-                            if text in seen_local_week_items:
-                                continue
-                            seen_local_week_items.add(text)
-                    local_blocks.append((f'<p>{html.escape(text)}</p>', text, False))
-                if heading_text.lower() == 'week ahead':
-                    deferred_blocks.extend(local_blocks)
-                else:
-                    for block_html, key, force in local_blocks:
-                        _push_html(block_html, key, force=force)
-
-        for block_html, key, force in deferred_blocks:
-            _push_html(block_html, key, force=force)
+                    if text.lower().startswith('read our past'):
+                        continue
+                    if elem.name == 'h2':
+                        _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=True)
+                    else:
+                        _push_html(f'<p>{html.escape(text)}</p>', text)
+            elif sub_name == 'image':
+                img = sib.find('img')
+                if img:
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if src:
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
 
         if not content_parts:
-            raise ValueError('blackrock_weekly content empty')
+            return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
 
         content_html = ''.join(content_parts)
-        if pdf_link:
-            content_html = re.sub(
-                r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\"\s<]+\.pdf',
-                pdf_link,
-                content_html,
-            )
         if not description:
             description = title
+        guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
+        return {
+            'title': title,
+            'link': pdf_link,
+            'description': description,
+            'content_html': content_html,
+            'date_str': date_str,
+            'guid': guid,
+        }
+
+    def _extract_blackrock_weekly_fallback(
+        self, raw: str, title: str, pdf_link: str, date_str: str
+    ) -> Dict[str, str]:
+        """Last-resort fallback: extract content from plain text when HTML parsing fails."""
+        content_parts: List[str] = []
+        content_parts.append(f'<p><strong>{html.escape(title)}</strong></p>')
+
+        lines = raw.split('\n')
+        in_body = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('Weekly video_') or line.startswith('Title slide:'):
+                continue
+            if line.startswith('[Download full commentary') or line.startswith('!['):
+                continue
+            if 'BLACKROCK INVESTMENT INSTITUTE' in line:
+                continue
+            if line in ('Weekly commentary', 'Transcript', 'Market take'):
+                in_body = True
+                continue
+            if not in_body:
+                if line.startswith('Opening frame:') or line.startswith('Camera frame') or len(line) > 60:
+                    in_body = True
+                else:
+                    continue
+            if line.startswith('Opening frame:') or line.startswith('Camera frame'):
+                continue
+            if line.isupper() and len(line) < 80:
+                content_parts.append(f'<p><strong>{html.escape(line)}</strong></p>')
+                continue
+            if line.startswith('•') or line.startswith('- '):
+                text = line.lstrip('•- ').strip()
+                if text:
+                    content_parts.append(f'<p>{html.escape(text)}</p>')
+                continue
+            if len(line) > 15:
+                content_parts.append(f'<p>{html.escape(line)}</p>')
+
+        if len(content_parts) <= 1:
+            content_parts.append(f'<p>{html.escape(title)}</p>')
+
+        content_html = ''.join(content_parts)
+        description = title
         guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
         return {
             'title': title,
