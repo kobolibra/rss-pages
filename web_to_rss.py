@@ -324,10 +324,21 @@ class WebToRSS:
         return text.strip()
 
     def _extract_blackrock_weekly(self, html_text: str) -> Dict[str, str]:
-        """Parse BlackRock Weekly Commentary page (Astro-based structure, 2026)."""
+        """Parse BlackRock Weekly Commentary page (Astro-based structure, 2026).
+
+        Strategy:
+        1. Phase 1: extract title/date/PDF from raw text (works with both jina.ai and raw HTML).
+        2. Phase 2: locate the article start by finding the <h1> tag in the DOM, then walk
+           Astro components from that point forward.  This avoids depending on a specific
+           component name like "Article Banner" which may change.
+        3. Stop at well-defined boundaries (past commentaries link, mega forces, meet the
+           authors, podcast promo).
+        """
         raw = self._normalize_text(html_text)
 
-        # --- Phase 1: extract title, date, PDF link from raw text ---
+        # ==================================================================
+        # Phase 1: extract title, date, PDF link from raw text
+        # ==================================================================
         m_video_date = re.search(r'Weekly video_(\d{8})', raw)
         video_compact = m_video_date.group(1) if m_video_date else ''
 
@@ -343,23 +354,29 @@ class WebToRSS:
         pdf_link = ''
         if video_compact:
             exact_pdf = re.search(
-                rf'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^)]+\.pdf)\)',
+                rf'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/(?:gls-download|corporate)/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^)]+\.pdf)\)',
                 raw,
             )
             if exact_pdf:
                 pdf_link = exact_pdf.group(1).strip()
             else:
                 exact_pdf = re.search(
-                    rf'(https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^\s)\]]+\.pdf)',
+                    rf'(https://www\.blackrock\.com/(?:gls-download|corporate)/literature/market-commentary/weekly-investment-commentary-en-us-{video_compact}-[^\s)\]]+\.pdf)',
                     raw,
                 )
                 if exact_pdf:
                     pdf_link = exact_pdf.group(1).strip()
 
         if not pdf_link:
-            m_pdf = re.search(r'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^)]+\.pdf)\)', raw)
+            m_pdf = re.search(
+                r'\[Download full commentary \(PDF\)\]\((https://www\.blackrock\.com/(?:gls-download|corporate)/literature/market-commentary/weekly-investment-commentary-en-us-[^)]+\.pdf)\)',
+                raw,
+            )
             if not m_pdf:
-                m_pdf = re.search(r'https://www\.blackrock\.com/corporate/literature/market-commentary/weekly-investment-commentary-en-us-[^\s)\]]+\.pdf', raw)
+                m_pdf = re.search(
+                    r'https://www\.blackrock\.com/(?:gls-download|corporate)/literature/market-commentary/weekly-investment-commentary-en-us-[^\s)\]]+\.pdf',
+                    raw,
+                )
             pdf_link = (m_pdf.group(1) if m_pdf and m_pdf.lastindex else m_pdf.group(0)).strip() if m_pdf else self.config['source']['url']
 
         date_str = ''
@@ -380,9 +397,11 @@ class WebToRSS:
             m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
             date_str = m_date.group(1).strip() if m_date else ''
 
-        # --- Phase 2: parse HTML for structured content ---
+        # ==================================================================
+        # Phase 2: parse HTML for structured content
+        # ==================================================================
         soup = BeautifulSoup(html_text, 'html.parser')
-        # If html_text is not HTML (jina.ai fallback), try direct request
+        # If html_text is not HTML (e.g. jina.ai fallback), try a direct request
         if not soup.find('html') and not soup.find('body') and not soup.find('div'):
             try:
                 raw_html = requests.get(
@@ -417,66 +436,138 @@ class WebToRSS:
                 src = 'https://www.blackrock.com' + src
             return src
 
-        def _text(elem) -> str:
-            return re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
+        _TEXT_JOIN = ' '
 
-        # --- Find all components in order ---
+        def _text(elem) -> str:
+            return re.sub(r'\s+', ' ', elem.get_text(_TEXT_JOIN, strip=True)).strip()
+
+        def _text_no_space(elem) -> str:
+            """Join without separator to avoid word-splitting from inline tags."""
+            return re.sub(r'\s+', ' ', elem.get_text('', strip=True)).strip()
+
+        # ==================================================================
+        # Locate the article start: find the <h1> element and walk backwards
+        # to its enclosing Astro component (or the nearest ancestor with
+        # data-componentname).  Everything before that component is
+        # navigation / header / modal / cookie-banner and MUST be skipped.
+        # ==================================================================
+        h1 = soup.find('h1')
+        if not h1:
+            # Last resort: try to find any element whose text matches the title
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4']):
+                if title and _text_no_space(tag).lower() == title.lower():
+                    h1 = tag
+                    break
+        if not h1:
+            # If we still can't find the heading, fall back entirely
+            if not title:
+                raise ValueError('blackrock_weekly title not found')
+            return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
+
+        # Extract title from the H1 (most reliable)
+        h1_text = _text_no_space(h1)
+        if h1_text:
+            title = h1_text
+
+        # Find the nearest ancestor (or self) with data-componentname
+        article_start_comp = h1
+        while article_start_comp and not article_start_comp.get('data-componentname'):
+            article_start_comp = article_start_comp.parent
+        start_comp_name = (article_start_comp.get('data-componentname') or '').strip() if article_start_comp else ''
+
+        # Also extract title from meta as fallback
+        meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
+        if meta_title and (meta_title.get('content') or '').strip() and not title:
+            title = (meta_title.get('content') or '').strip()
+
+        # Extract date from the H1's containing component if not already found
+        if not date_str and article_start_comp:
+            comp_text = article_start_comp.get_text(' ', strip=True)
+            m_bd = re.search(r'([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})', comp_text)
+            if m_bd:
+                try:
+                    date_str = datetime.strptime(m_bd.group(1), '%b %d, %Y').strftime('%b %d, %Y')
+                except Exception:
+                    pass
+
+        # Try pageSummary meta for description
+        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
+        if meta_summary and (meta_summary.get('content') or '').strip():
+            description = (meta_summary.get('content') or '').strip()
+
+        # ==================================================================
+        # Collect all Astro components in document order
+        # ==================================================================
         all_comps = soup.find_all(attrs={'data-componentname': True})
         if not all_comps:
-            # Fallback: no Astro components; try old Body Tabs or raw text
             body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
             if body_tabs:
                 return self._extract_blackrock_body_tabs(soup, body_tabs, title, pdf_link, date_str, raw)
             return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
 
-        # --- Extract title from Article Banner or meta ---
-        meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
-        if meta_title and (meta_title.get('content') or '').strip():
-            title = (meta_title.get('content') or '').strip()
-
-        # Also try Article Banner component
-        banner = soup.find(attrs={'data-componentname': 'Article Banner'})
-        banner_date = ''
-        if banner:
-            banner_text = banner.get_text(' ', strip=True)
-            # Extract date from banner: "Title Aug 3, 2026 | BlackRock..."
-            m_bd = re.search(r'([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})', banner_text)
-            if m_bd and not date_str:
-                banner_date = m_bd.group(1)
-                try:
-                    date_str = datetime.strptime(banner_date, '%b %d, %Y').strftime('%b %d, %Y')
-                except Exception:
-                    pass
-
-        if not title:
-            # Try h1 in the first Basic Text or Heading
-            first_h = soup.find('h1') or (banner.find('h1') if banner else None)
-            if first_h:
-                title = _text(first_h)
-        if not title:
-            raise ValueError('blackrock_weekly title not found')
-
-        meta_summary = soup.find('meta', attrs={'name': 'pageSummary'})
-        if meta_summary and (meta_summary.get('content') or '').strip():
-            description = (meta_summary.get('content') or '').strip()
-
-        # --- Walk components: extract article content only ---
-        seen_article = False  # True after we pass Article Banner
+        # ==================================================================
+        # Walk components: only process those on or after the article-start
+        # component, and stop at well-defined boundaries.
+        # ==================================================================
+        seen_article = False
         stopped = False
 
+        # Component names that are NEVER article content
         SKIP_COMPONENTS = {
             'navigation', 'investor attestation', 'exit modal',
             'video player', 'expandable content', 'disclaimer',
-            'mid-page banner', 'eloqua component',
+            'mid-page banner', 'eloqua component', 'mega menu',
+            'header', 'footer', 'local website selector',
+            'breadcrumb', 'search', 'language selector',
         }
-        BOUNDARY_TEXTS = [
+
+        # Text patterns that mark the end of the article body
+        BOUNDARY_STOP_TEXTS = [
             'read our past weekly market commentaries',
             'intersecting mega forces',
             'big calls',
             'tactical granular views',
             'meet the authors',
             'on the go?',
+            'from drivers to portfolio expressions',
+            'asset class implications',
+            'euro-denominated tactical granular views',
+            'explore bii',
+            'contact the team',
+            'sign up to the latest insights',
         ]
+
+        # Navigation text patterns — if found in an otherwise-unknown component,
+        # treat it as navigation and skip
+        NAV_PATTERNS = [
+            'about blackrock', 'principles', 'leadership', 'history',
+            'contacts and locations', 'global insights', 'investment stewardship',
+            'our approach to sustainability', 'public policy',
+            'investor relations', 'annual reports', 'sec filings',
+            'stock information', 'dividend history', 'corporate governance',
+            'corporate sustainability', 'human capital', 'environmental sustainability',
+            'ethics and integrity', 'health and safety', 'social impact',
+            'search jobs', 'life at blackrock', 'benefits', 'career development',
+            'students & graduates', 'supporting our veterans',
+            'local websites', 'search results', 'no search results found',
+            'please double-check your spelling',
+            'welcome to blackrock corporate site',
+            'before we proceed', 'please read this page before proceeding',
+            'by entering this site', 'no offer', 'no warranty', 'no liability',
+            'intellectual property rights', 'you are now leaving',
+        ]
+
+        def _is_navigation(comp_text_lower: str) -> bool:
+            """Heuristic: if the component text is mostly navigation boilerplate, skip it."""
+            # Count how many nav patterns match
+            hits = sum(1 for p in NAV_PATTERNS if p in comp_text_lower)
+            # If the text is long and many nav patterns match, it's navigation
+            if hits >= 3 and len(comp_text_lower) > 200:
+                return True
+            # Short text with many nav hits
+            if hits >= 2 and len(comp_text_lower) > 100:
+                return True
+            return False
 
         for comp in all_comps:
             if stopped:
@@ -484,39 +575,79 @@ class WebToRSS:
             comp_name = (comp.get('data-componentname') or '').strip()
             comp_lower = comp_name.lower()
 
-            if comp_name == 'Article Banner':
-                seen_article = True
-                continue
-
+            # --- Article start detection ---
             if not seen_article:
-                continue
+                if start_comp_name and comp_name == start_comp_name:
+                    seen_article = True
+                elif comp is article_start_comp:
+                    seen_article = True
+                elif h1 in comp.descendants:
+                    seen_article = True
+                # Also accept: any component whose name suggests it's article content
+                # and contains the title text
+                elif comp_lower in ('basic text', 'heading + subheading', 'chart & table',
+                                     'chart &amp; table', 'button block', 'simple image'):
+                    ct = comp.get_text(' ', strip=True).lower()
+                    if title.lower() in ct:
+                        seen_article = True
+                if not seen_article:
+                    continue
 
+            # Skip the article-start component itself if it's just a banner/header
+            # (we already extracted title/date from it)
+            if seen_article and comp is article_start_comp:
+                # Check if this component has useful body content beyond the title
+                comp_text_full = comp.get_text(' ', strip=True)
+                # If it's just title + date + author, skip it
+                body_only = comp_text_full
+                if title:
+                    body_only = body_only.replace(title, '', 1)
+                body_only = body_only.strip()
+                if len(body_only) < 50:
+                    # This is just a banner — skip, but extract PDF link if present
+                    for a in comp.find_all('a', href=True):
+                        href = a.get('href', '').strip()
+                        if 'weekly-investment-commentary' in href and href.endswith('.pdf'):
+                            if href.startswith('/'):
+                                href = 'https://www.blackrock.com' + href
+                            pdf_link = href
+                    continue
+                # Otherwise, it has body content — fall through to component handlers
+
+            # --- Skip known non-content components ---
             if comp_lower in SKIP_COMPONENTS:
                 continue
 
-            comp_text = _text(comp).lower()
+            # --- Navigation heuristic ---
+            comp_text_lower = comp.get_text(' ', strip=True).lower()
+            if _is_navigation(comp_text_lower):
+                continue
 
-            # Check boundary
-            if any(b in comp_text for b in BOUNDARY_TEXTS):
-                if comp_lower == 'basic text':
-                    # Only stop if it's the boundary text, not just any mention
-                    if 'read our past weekly market commentaries' in comp_text:
-                        stopped = True
-                        continue
-                    if 'intersecting mega forces' in comp_text and 'since we launched' in comp_text:
-                        stopped = True
-                        continue
-                    if 'big calls' in comp_text or 'tactical granular views' in comp_text:
-                        stopped = True
-                        continue
-                if comp_lower == 'heading + subheading':
-                    if 'meet the authors' in comp_text or 'on the go?' in comp_text:
-                        stopped = True
-                        continue
+            # --- Boundary detection ---
+            for boundary in BOUNDARY_STOP_TEXTS:
+                if boundary in comp_text_lower:
+                    # Only stop if the boundary text is prominent (heading or first text)
+                    # and the component is structured like a section boundary
+                    if comp_lower in ('basic text', 'heading + subheading', 'heading'):
+                        # Check if the boundary text is in a heading element
+                        headings = comp.find_all(['h1', 'h2', 'h3', 'h4'])
+                        heading_texts = [_text_no_space(h).lower() for h in headings]
+                        if any(boundary in ht for ht in heading_texts):
+                            stopped = True
+                            break
+                        # Also check if it's the first significant text in the component
+                        first_p = comp.find('p')
+                        if first_p and boundary in _text(first_p).lower()[:120]:
+                            stopped = True
+                            break
+            if stopped:
+                break
 
-            # --- Component-specific extraction ---
+            # ==============================================================
+            # Component-specific extraction
+            # ==============================================================
+
             if comp_lower == 'basic text':
-                # Extract h2/h3 headings and paragraphs in order
                 for elem in comp.find_all(['h2', 'h3', 'p', 'img']):
                     if elem.name == 'img':
                         src = _img_src(elem)
@@ -525,19 +656,27 @@ class WebToRSS:
                         continue
                     if elem.name in ('h2', 'h3'):
                         # Use no-space join to avoid "Week ahea d" from inline <strong> tags
-                        text = re.sub(r'\s+', ' ', elem.get_text('', strip=True)).strip()
+                        text = _text_no_space(elem)
                         if not text:
+                            continue
+                        # Skip if this heading matches the article title (avoid duplication)
+                        if text.lower() == title.lower():
                             continue
                         _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=True)
                     else:
                         text = _text(elem)
                         if not text:
                             continue
+                        # Skip if this paragraph is just the article title repeated
+                        if text.lower() == title.lower():
+                            continue
                         # If a <p> contains only a <strong> with short text, render as bold heading
                         strong = elem.find('strong')
                         if strong and len(text) < 80:
                             strong_text = _text(strong)
                             if strong_text and len(strong_text) >= len(text) * 0.7:
+                                if text.lower() == title.lower():
+                                    continue
                                 _push_html(f'<p><strong>{html.escape(text)}</strong></p>', text, force=True)
                                 continue
                         _push_html(f'<p>{html.escape(text)}</p>', text)
@@ -559,7 +698,15 @@ class WebToRSS:
                                 pdf_link = href
                 except Exception:
                     pass
-                # Add download link
+                # Also try direct <a> tags
+                if not pdf_link or pdf_link == self.config['source']['url']:
+                    for a in comp.find_all('a', href=True):
+                        href = a.get('href', '').strip()
+                        if 'weekly-investment-commentary' in href and href.endswith('.pdf'):
+                            if href.startswith('/'):
+                                href = 'https://www.blackrock.com' + href
+                            pdf_link = href
+                            break
                 _push_html(
                     f'<p><a href="{html.escape(pdf_link)}" target="_blank" rel="noopener">Download full commentary (PDF)</a></p>',
                     'download full commentary',
@@ -567,12 +714,12 @@ class WebToRSS:
                 )
 
             elif comp_lower in ('chart & table', 'chart &amp; table'):
-                # Extract image(s) and source text
+                # Extract image(s) — these are the chart SVGs/PNGs
                 for img in comp.find_all('img'):
                     src = _img_src(img)
                     if src and 'marketing-service/font' not in src:
                         _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
-                # Source text (from oneds-source div)
+                # Source / footnote text
                 source_div = comp.find('div', class_=re.compile(r'oneds-source'))
                 if source_div:
                     source_text = _text(source_div)
@@ -582,10 +729,9 @@ class WebToRSS:
             elif comp_lower == 'heading + subheading':
                 heading = comp.find(['h2', 'h3', 'h4'])
                 if heading:
-                    heading_text = re.sub(r'\s+', ' ', heading.get_text('', strip=True)).strip()
-                    if heading_text:
+                    heading_text = _text_no_space(heading)
+                    if heading_text and heading_text.lower() != title.lower():
                         _push_html(f'<p><strong>{html.escape(heading_text)}</strong></p>', heading_text, force=True)
-                # Body paragraphs
                 intro_div = comp.find('div', class_='headline-intro')
                 if intro_div:
                     for p in intro_div.find_all('p', recursive=False):
@@ -606,8 +752,16 @@ class WebToRSS:
                     if src and 'marketing-service/font' not in src:
                         _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
 
+            # Catch-all: if component has useful images or substantial text, extract it
+            elif comp_lower not in SKIP_COMPONENTS and not _is_navigation(comp_text_lower):
+                # Try to extract images from unknown components
+                imgs = comp.find_all('img')
+                for img in imgs:
+                    src = _img_src(img)
+                    if src and 'marketing-service/font' not in src:
+                        _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+
         if not content_parts:
-            # Fallback to raw text extraction
             return self._extract_blackrock_weekly_fallback(raw, title, pdf_link, date_str)
 
         content_html = ''.join(content_parts)
@@ -718,38 +872,147 @@ class WebToRSS:
     def _extract_blackrock_weekly_fallback(
         self, raw: str, title: str, pdf_link: str, date_str: str
     ) -> Dict[str, str]:
-        """Last-resort fallback: extract content from plain text when HTML parsing fails."""
+        """Last-resort fallback: extract content from plain text when HTML parsing fails.
+
+        This is only reached when the page has no Astro components (e.g. jina.ai text-only
+        fetch).  We aggressively filter out navigation boilerplate and stop at well-known
+        boundaries.
+        """
         content_parts: List[str] = []
-        content_parts.append(f'<p><strong>{html.escape(title)}</strong></p>')
+
+        # Navigation / boilerplate line patterns to skip
+        NAV_LINE_PATTERNS = [
+            'about blackrock', 'principles', 'leadership', 'history',
+            'contacts and locations', 'blackrock iShares aladdin our company',
+            'global insights', 'investment stewardship', 'our approach to sustainability',
+            'public policy', 'investor relations', 'annual reports', 'sec filings',
+            'stock information', 'dividend history', 'corporate governance',
+            'corporate sustainability', 'human capital', 'environmental sustainability',
+            'ethics and integrity', 'health and safety', 'social impact',
+            'search jobs', 'life at blackrock', 'benefits', 'career development',
+            'students & graduates', 'supporting our veterans', 'alumni network',
+            'local websites', 'search results', 'no search results found',
+            'please double-check your spelling', 'welcome to blackrock',
+            'before we proceed', 'please read this page', 'by entering this site',
+            'no offer', 'no warranty', 'no liability', 'intellectual property rights',
+            'you are now leaving', 'fraud protection tips', 'careers',
+            'newsroom', 'insights', 'thought leadership', 'mega forces',
+            'change location', 'video player is loading', 'current time',
+            'loaded:', 'remaining time', 'mute', 'picture-in-picture',
+            'fullscreen', 'play video', 'close modal dialog', 'end of dialog window',
+            'text color', 'background color', 'window color', 'font size',
+            'text edge style', 'font family', 'reset restore all settings',
+            'this is a modal window', 'the media could not be loaded',
+            'beginning of dialog window',
+        ]
+
+        # Lines that mark the end of article content
+        STOP_LINES = [
+            'read our past weekly market commentaries',
+            'intersecting mega forces',
+            'big calls',
+            'tactical granular views',
+            'meet the authors',
+            'on the go?',
+            'from drivers to portfolio expressions',
+            'asset class implications',
+            'euro-denominated tactical granular views',
+            'explore bii',
+            'contact the team',
+            'sign up to the latest insights',
+            'past performance is not a reliable indicator',
+        ]
+
+        def _is_nav_line(line_lower: str) -> bool:
+            for pat in NAV_LINE_PATTERNS:
+                if pat in line_lower:
+                    return True
+            return False
+
+        def _is_title_line(line: str) -> bool:
+            return line.lower() == title.lower()
 
         lines = raw.split('\n')
         in_body = False
+        in_video_transcript = False
+        stopped = False
+
         for line in lines:
+            if stopped:
+                break
             line = line.strip()
             if not line:
                 continue
+
+            line_lower = line.lower()
+
+            # Skip video transcript lines
             if line.startswith('Weekly video_') or line.startswith('Title slide:'):
+                in_video_transcript = True
                 continue
             if line.startswith('[Download full commentary') or line.startswith('!['):
                 continue
             if 'BLACKROCK INVESTMENT INSTITUTE' in line:
                 continue
             if line in ('Weekly commentary', 'Transcript', 'Market take'):
-                in_body = True
+                in_video_transcript = True
                 continue
-            if not in_body:
-                if line.startswith('Opening frame:') or line.startswith('Camera frame') or len(line) > 60:
+
+            # If we're in video transcript, skip until we hit the article body
+            if in_video_transcript:
+                if line.startswith('Opening frame:') or line.startswith('Camera frame'):
+                    continue
+                if line.startswith('Closing frame:') or line.startswith('Header:'):
+                    continue
+                if line.startswith('Outro:') or line.startswith('Read details:'):
+                    continue
+                # Video transcript numbered items: "1: Higher for longer", etc.
+                if re.match(r'^\d+:\s', line):
+                    continue
+                # When we see a line that looks like article body (long, not nav), transition out
+                if len(line) > 80 and not _is_nav_line(line_lower):
+                    in_video_transcript = False
                     in_body = True
                 else:
                     continue
-            if line.startswith('Opening frame:') or line.startswith('Camera frame'):
+
+            if not in_body:
+                # Skip navigation lines
+                if _is_nav_line(line_lower):
+                    continue
+                # Skip title line (will be added as heading)
+                if _is_title_line(line):
+                    in_body = True
+                    continue
+                # Skip short lines that look like UI elements
+                if len(line) < 30:
+                    continue
+                # Any substantial line triggers body start
+                if len(line) > 60:
+                    in_body = True
+                else:
+                    continue
+
+            # Check stop boundaries
+            if any(s in line_lower for s in STOP_LINES):
+                stopped = True
                 continue
+
+            # Skip remaining navigation
+            if _is_nav_line(line_lower):
+                continue
+
+            # Skip title line to avoid duplication
+            if _is_title_line(line):
+                continue
+
+            # Render as bold if it looks like a heading (short, mixed case)
             if line.isupper() and len(line) < 80:
                 content_parts.append(f'<p><strong>{html.escape(line)}</strong></p>')
                 continue
             if line.startswith('•') or line.startswith('- '):
                 text = line.lstrip('•- ').strip()
-                if text:
+                if text and not _is_nav_line(text.lower()):
                     content_parts.append(f'<p>{html.escape(text)}</p>')
                 continue
             if len(line) > 15:
