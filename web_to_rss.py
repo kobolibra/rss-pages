@@ -515,7 +515,7 @@ class WebToRSS:
         # Component names that are NEVER article content
         SKIP_COMPONENTS = {
             'navigation', 'investor attestation', 'exit modal',
-            'video player', 'expandable content', 'disclaimer',
+            'video player', 'disclaimer',
             'mid-page banner', 'eloqua component', 'mega menu',
             'header', 'footer', 'local website selector',
             'breadcrumb', 'search', 'language selector',
@@ -751,6 +751,24 @@ class WebToRSS:
                     src = _img_src(img)
                     if src and 'marketing-service/font' not in src:
                         _push_html(f'<p><img src="{html.escape(src)}" alt="" /></p>', src)
+
+            elif comp_lower == 'expandable content':
+                # Extract source/disclaimer text from expandable sections.
+                # Skip font-awesome icons, extract only meaningful text content.
+                for elem in comp.find_all(['p', 'div', 'span']):
+                    # Skip elements that are just icons
+                    imgs_in = elem.find_all('img')
+                    if imgs_in and all('marketing-service/font' in (_img_src(i) or '') for i in imgs_in):
+                        continue
+                    text = _text(elem)
+                    if not text:
+                        continue
+                    if len(text) < 15:
+                        continue
+                    # Skip if it looks like navigation
+                    if _is_navigation(text.lower()):
+                        continue
+                    _push_html(f'<p><em>{html.escape(text)}</em></p>', text[:80])
 
             # Catch-all: if component has useful images or substantial text, extract it
             elif comp_lower not in SKIP_COMPONENTS and not _is_navigation(comp_text_lower):
