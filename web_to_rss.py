@@ -323,6 +323,90 @@ class WebToRSS:
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
+    def _extract_blackrock_weekly_text_fallback(
+        self, raw: str, title: str, pdf_link: str, date_str: str
+    ) -> Dict[str, str]:
+        """Fallback: extract content from text/HTML response when Body Tabs not found."""
+        content_parts: List[str] = []
+        content_parts.append(f'<p><strong>{html.escape(title)}</strong></p>')
+
+        # If raw looks like HTML, extract text via BeautifulSoup; otherwise treat as plain text
+        has_html_tags = bool(re.search(r'<(html|body|div|p|span|h[1-6])\b', raw, re.I))
+        if has_html_tags:
+            # Extract text from HTML, preserving paragraph structure
+            try:
+                soup = BeautifulSoup(raw, 'html.parser')
+                body = soup.find('body') or soup
+                for elem in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li']):
+                    text = re.sub(r'\s+', ' ', elem.get_text(' ', strip=True)).strip()
+                    if not text:
+                        continue
+                    if elem.name in ('h1', 'h2', 'h3', 'h4'):
+                        content_parts.append(f'<p><strong>{html.escape(text)}</strong></p>')
+                    else:
+                        content_parts.append(f'<p>{html.escape(text)}</p>')
+                # Also extract images
+                for img in body.find_all('img'):
+                    src = (img.get('data-src') or img.get('src') or '').strip()
+                    if src:
+                        if src.startswith('/'):
+                            src = 'https://www.blackrock.com' + src
+                        content_parts.append(f'<p><img src="{html.escape(src)}" alt="" /></p>')
+            except Exception:
+                pass
+        else:
+            lines = raw.split('\n')
+            in_body = False
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                # Skip known metadata / header lines
+                if line.startswith('Weekly video_') or line.startswith('Title slide:'):
+                    continue
+                if line.startswith('[Download full commentary') or line.startswith('!['):
+                    continue
+                if 'BLACKROCK INVESTMENT INSTITUTE' in line:
+                    continue
+                if line in ('Weekly commentary', 'Transcript', 'Market take'):
+                    in_body = True
+                    continue
+                if not in_body:
+                    if line.startswith('Opening frame:') or line.startswith('Camera frame') or len(line) > 60:
+                        in_body = True
+                    else:
+                        continue
+                if line.startswith('Opening frame:') or line.startswith('Camera frame'):
+                    continue
+                # Section headers (all-caps, relatively short)
+                if line.isupper() and len(line) < 80:
+                    content_parts.append(f'<p><strong>{html.escape(line)}</strong></p>')
+                    continue
+                # Bullet points
+                if line.startswith('•') or line.startswith('- '):
+                    text = line.lstrip('•- ').strip()
+                    if text:
+                        content_parts.append(f'<p>{html.escape(text)}</p>')
+                    continue
+                # Regular paragraph
+                if len(line) > 15:
+                    content_parts.append(f'<p>{html.escape(line)}</p>')
+
+        if len(content_parts) <= 1:
+            content_parts.append(f'<p>{html.escape(title)}</p>')
+
+        content_html = ''.join(content_parts)
+        description = title
+        guid = hashlib.md5(f'{title}|{date_str}|{pdf_link}'.encode('utf-8')).hexdigest()
+        return {
+            'title': title,
+            'link': pdf_link,
+            'description': description,
+            'content_html': content_html,
+            'date_str': date_str,
+            'guid': guid,
+        }
+
     def _extract_blackrock_weekly(self, html_text: str) -> Dict[str, str]:
         raw = self._normalize_text(html_text)
 
@@ -378,12 +462,20 @@ class WebToRSS:
             m_date = re.search(r'\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\b', raw)
             date_str = m_date.group(1).strip() if m_date else ''
 
-        raw_html = requests.get(
-            self.config['source']['url'],
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
-            timeout=30,
-        ).text
-        soup = BeautifulSoup(raw_html, 'html.parser')
+        # Use html_text for BeautifulSoup parsing (avoid redundant request --
+        # _fetch_html with prefer_raw=True already returned raw HTML or jina.ai text).
+        soup = BeautifulSoup(html_text, 'html.parser')
+        # If html_text is not HTML (jina.ai fallback), try direct request
+        if not soup.find('html') and not soup.find('body') and not soup.find('div'):
+            try:
+                raw_html = requests.get(
+                    self.config['source']['url'],
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; WebToRSS/1.0)'},
+                    timeout=30,
+                ).text
+                soup = BeautifulSoup(raw_html, 'html.parser')
+            except Exception:
+                pass
 
         meta_title = soup.find('meta', attrs={'name': 'articleTitle'})
         if meta_title and (meta_title.get('content') or '').strip():
@@ -396,7 +488,8 @@ class WebToRSS:
 
         body_tabs = soup.find(attrs={'data-componentname': re.compile(r'^Body Tabs$', re.I)})
         if not body_tabs:
-            raise ValueError('blackrock_weekly body tabs not found')
+            # Page structure changed: fall back to text-based content extraction
+            return self._extract_blackrock_weekly_text_fallback(raw, title, pdf_link, date_str)
         tab0 = body_tabs.find_next('div', attrs={'data-tab-id': '0'})
         tab0_items = [x.strip() for x in (tab0.get_text(' ', strip=True).split(',') if tab0 else []) if x.strip()]
         wrap = body_tabs.find_parent('div', class_='ls-cmp-wrap')
