@@ -145,6 +145,8 @@ jobs:
           # BlackRock-only: cap oversized charts via injected CSS and rehost remote
           # images onto our Pages domain so Readwise Reader can fetch them.
           python scripts/fix_blackrock_pages.py site "$BASE_URL"
+          # Blackstone: rehost scene7 CDN images to our Pages domain.
+          python scripts/fix_blackstone_pages.py site "$BASE_URL"
 
       - name: Add index page
         run: |
