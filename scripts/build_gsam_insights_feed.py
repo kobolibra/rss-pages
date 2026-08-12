@@ -374,9 +374,15 @@ if __name__ == '__main__':
         page_path = hit.get("pagePath") or hit.get("slug") or ""
         page_url = urljoin(SITE_BASE, page_path)
         slug = slugify(page_path.split('/')[-1] if page_path else title)
+        item_dir = site_dir / 'item' / FEED_NAME / slug
+        # Incremental: skip if the page already exists (avoids resetting
+        # already-rehosted images back to remote URLs and saves ~50 HTTP
+        # requests per run).
+        if (item_dir / 'index.html').exists():
+            print(f'[gsam] skip (exists) {slug}')
+            continue
         page_json = fetch_next_json(page_url)
         article = extract_article_data(page_json)
-        item_dir = site_dir / 'item' / FEED_NAME / slug
         item_dir.mkdir(parents=True, exist_ok=True)
         (item_dir / 'index.html').write_text(build_item_page(hit, page_url, article), encoding='utf-8')
 
