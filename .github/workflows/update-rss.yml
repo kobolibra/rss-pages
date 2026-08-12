@@ -149,6 +149,8 @@ jobs:
           python scripts/fix_blackstone_pages.py site "$BASE_URL"
           # KKR: rehost kkr.com CDN images to our Pages domain.
           python scripts/fix_kkr_pages.py site "$BASE_URL"
+          # GSAM: rehost am.gs.com CDN images to our Pages domain.
+          python scripts/fix_gsam_pages.py site "$BASE_URL"
 
       - name: Add index page
         run: |
