@@ -41,7 +41,7 @@ jobs:
 
       - name: Mirror RSS feeds
         run: |
-          python scripts/mirror_feeds.py
+          xvfb-run -a python scripts/mirror_feeds.py
         env:
           OUT_DIR: site
 
