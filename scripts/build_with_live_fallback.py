@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import shlex
 import subprocess
 import sys
@@ -20,7 +21,9 @@ def main() -> int:
     command = sys.argv[5:]
 
     print(f"[build_with_live_fallback] building {feed_name}: {' '.join(shlex.quote(x) for x in command)}")
-    proc = subprocess.run(command, text=True)
+    child_env = os.environ.copy()
+    child_env["WEB_TO_RSS_LIVE_FEED_URL"] = f"{base_url}/{feed_name}.xml"
+    proc = subprocess.run(command, text=True, env=child_env)
     if proc.returncode == 0:
         print(f"[build_with_live_fallback] build succeeded: {feed_name}")
         return 0

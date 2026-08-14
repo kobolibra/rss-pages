@@ -35,6 +35,10 @@ jobs:
           mkdir -p site feeds/output
           rm -f feeds/output/*.xml feeds/output/*_items.json || true
 
+      - name: Install Chromium (Carlyle, Blackstone + KKR, non-fatal)
+        run: |
+          python -m playwright install --with-deps chromium || python -m playwright install chromium || echo "[browser] chromium install failed; date/image browser fallbacks may be unavailable"
+
       - name: Mirror RSS feeds
         run: |
           python scripts/mirror_feeds.py
@@ -102,10 +106,6 @@ jobs:
             python scripts/restore_live_pages_feed.py "$BASE_URL" site "blackrock_weekly_commentary,barclays_weekly_insights,trivium_finance_regs"
             python scripts/validate_feeds.py site
           fi
-
-      - name: Install Chromium (Blackstone + KKR, non-fatal)
-        run: |
-          python -m playwright install --with-deps chromium || python -m playwright install chromium || echo "[blackstone] chromium install failed; will fall back to requests"
 
       - name: Build experimental feeds (non-fatal, but observable)
         run: |

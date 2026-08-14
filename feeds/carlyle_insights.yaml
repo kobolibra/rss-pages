@@ -20,5 +20,6 @@ output:
 settings:
   max_items: 20
   dedup: true
+  parse_mode: "carlyle_insights"
 
 output_file: "carlyle_insights.xml"

@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 import html
@@ -255,6 +255,99 @@ class WebToRSS:
     def _save_cache(self, url: str, html: str):
         p = self.cache_dir / f"{self._cache_key(url)}.html"
         p.write_text(html, encoding="utf-8")
+
+    def _load_live_feed_xml(self) -> Optional[str]:
+        """Load the last published feed for incremental comparison."""
+        feed_url = os.getenv("WEB_TO_RSS_LIVE_FEED_URL", "").strip()
+        if not feed_url:
+            return None
+        try:
+            response = requests.get(feed_url, timeout=30, headers={"User-Agent": "Mozilla/5.0 (compatible; WebToRSS/1.0)"})
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            if root.find("channel") is None:
+                return None
+            return response.text
+        except Exception as exc:
+            print(f"[WebToRSS] live feed unavailable; rebuilding normally: {exc}")
+            return None
+
+    @staticmethod
+    def _item_identity(item) -> str:
+        guid = (item.findtext("guid") or "").strip()
+        if guid:
+            return "guid:" + guid
+        title = (item.findtext("title") or "").strip().lower()
+        link = (item.findtext("link") or "").strip().lower()
+        return "title-link:" + title + "|" + link
+
+    def _previous_items(self, xml_text: Optional[str]) -> Dict[str, Any]:
+        if not xml_text:
+            return {}
+        try:
+            root = ET.fromstring(xml_text)
+            channel = root.find("channel")
+            return {self._item_identity(item): item for item in (channel.findall("item") if channel is not None else [])}
+        except Exception as exc:
+            print(f"[WebToRSS] invalid live feed ignored: {exc}")
+            return {}
+
+    def _keep_previous_if_no_new(self, xml: str) -> str:
+        previous_xml = self._load_live_feed_xml()
+        previous_items = self._previous_items(previous_xml)
+        if not previous_xml or not previous_items:
+            return xml
+        try:
+            root = ET.fromstring(xml)
+            channel = root.find("channel")
+            current_items = channel.findall("item") if channel is not None else []
+            current_ids = {self._item_identity(item) for item in current_items}
+        except Exception as exc:
+            print(f"[WebToRSS] generated feed could not be compared: {exc}")
+            return xml
+        if not current_items or current_ids.issubset(previous_items):
+            print(f"[WebToRSS] no new items; kept published feed unchanged (items={len(previous_items)})")
+            return previous_xml
+        return xml
+
+    def _write_output(self, xml: str) -> str:
+        xml = self._keep_previous_if_no_new(xml)
+        out_file = self.config.get("output_file")
+        if out_file:
+            p = self.out_dir / out_file
+            p.write_text(xml, encoding="utf-8")
+            print(f"[WebToRSS] saved: {p}")
+        return xml
+
+    def _fetch_carlyle_dates(self, urls: List[str]) -> Dict[str, str]:
+        """Fetch exact Carlyle dates only for new items or one-time legacy repair."""
+        if not urls:
+            return {}
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:
+            print(f"[WebToRSS] Carlyle date lookup unavailable: {exc}")
+            return {}
+        date_re = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b")
+        result = {}
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                for url in urls:
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                        text = page.locator("body").inner_text(timeout=15000)
+                        match = date_re.search(text)
+                        if match:
+                            result[url] = match.group(0)
+                            print(f"[WebToRSS] Carlyle date: {url} -> {match.group(0)}")
+                    except Exception as exc:
+                        print(f"[WebToRSS] Carlyle date lookup failed for {url}: {exc}")
+                browser.close()
+        except Exception as exc:
+            print(f"[WebToRSS] Carlyle browser unavailable: {exc}")
+        return result
 
     def _parse_desc_and_date(self, body: str) -> Tuple[str, Optional[str]]:
         """
@@ -1370,11 +1463,7 @@ class WebToRSS:
         if parse_mode == "blackrock_weekly_single":
             xml = self._generate_blackrock_weekly(page_html, src)
             out_file = self.config.get("output_file")
-            if out_file:
-                p = self.out_dir / out_file
-                p.write_text(xml, encoding="utf-8")
-                print(f"[WebToRSS] saved: {p}")
-            return xml
+            return self._write_output(xml)
 
 
         ch = self.config["output"]["channel"]
@@ -1435,11 +1524,7 @@ class WebToRSS:
         if parse_mode == "yardeni_morning_briefing":
             xml = self._generate_yardeni_morning_briefing(page_html, public_base=public_base or os.getenv("WEB_TO_RSS_PUBLIC_BASE", ""))
             out_file = self.config.get("output_file")
-            if out_file:
-                p = self.out_dir / out_file
-                p.write_text(xml, encoding="utf-8")
-                print(f"[WebToRSS] saved: {p}")
-            return xml
+            return self._write_output(xml)
 
         extraction = self.config.get("extraction", {})
         pattern = extraction.get("pattern", "")
@@ -1486,6 +1571,32 @@ class WebToRSS:
         out_file = self.config.get("output_file")
 
         builder = RSSBuilder(ch["title"], ch["link"], ch["description"])
+
+        live_xml = self._load_live_feed_xml()
+        previous_items = self._previous_items(live_xml)
+        previous_dates = {
+            identity: (item.findtext("pubDate") or "").strip()
+            for identity, item in previous_items.items()
+        }
+        legacy_carlyle_dates = (
+            parse_mode == "carlyle_insights"
+            and len(previous_dates) > 1
+            and len({value for value in previous_dates.values() if value}) <= 1
+        )
+        carlyle_date_urls: List[str] = []
+        if parse_mode == "carlyle_insights":
+            for groups, _start, _end, _full in matches:
+                try:
+                    candidate_link = item_cfg["link"].format(*groups)
+                except (IndexError, KeyError):
+                    candidate_link = groups[link_group - 1] if len(groups) >= link_group else ""
+                candidate_title = item_cfg["title"].format(*groups)
+                candidate_guid = self._md5(f"{candidate_title}{candidate_link}")
+                candidate_identity = "guid:" + candidate_guid
+                if legacy_carlyle_dates or candidate_identity not in previous_items:
+                    if candidate_link and candidate_link not in carlyle_date_urls:
+                        carlyle_date_urls.append(candidate_link)
+        carlyle_dates = self._fetch_carlyle_dates(carlyle_date_urls)
 
         seen = set()
         new_guids = set()
@@ -1536,6 +1647,7 @@ class WebToRSS:
                         continue
 
             guid = self._md5(f"{title_raw}{link}")
+            identity = "guid:" + guid
 
             if dedup and guid in seen:
                 continue
@@ -1543,18 +1655,26 @@ class WebToRSS:
             new_guids.add(guid)
             count += 1
 
-            if date_str:
-                try:
-                    dt = datetime.strptime(date_str, "%B %d, %Y")
-                    pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
-                except ValueError:
-                    try:
-                        dt = datetime.strptime(date_str, "%b. %Y")
-                        pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
-                    except Exception:
-                        pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+            # Existing entries keep the date already published in the live feed.
+            # This prevents a rebuild from changing every old article to "now".
+            if identity in previous_dates and previous_dates[identity] and not legacy_carlyle_dates:
+                pub_date = previous_dates[identity]
             else:
-                pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+                exact_date = carlyle_dates.get(link) if parse_mode == "carlyle_insights" else None
+                date_str = exact_date or date_str
+                if date_str:
+                    pub_date = None
+                    for fmt in ("%B %d, %Y", "%b. %d, %Y", "%b %d, %Y", "%b. %Y", "%Y-%m-%d"):
+                        try:
+                            dt = datetime.strptime(date_str, fmt)
+                            pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                            break
+                        except ValueError:
+                            continue
+                    if pub_date is None:
+                        pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+                else:
+                    pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
 
             builder.add_item(
                 title=title_raw,
@@ -1570,12 +1690,7 @@ class WebToRSS:
         print(f"[WebToRSS] matched={len(matches)} emitted={count} new={len(new_guids)}")
         xml = builder.to_xml()
 
-        if out_file:
-            p = self.out_dir / out_file
-            p.write_text(xml, encoding="utf-8")
-            print(f"[WebToRSS] saved: {p}")
-
-        return xml
+        return self._write_output(xml)
 
     def serve(self, host: str = "0.0.0.0", port: int = 8769, path: str = "/feed"):
         from http.server import HTTPServer, BaseHTTPRequestHandler
