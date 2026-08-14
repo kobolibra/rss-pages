@@ -86,10 +86,10 @@ def browser_fetch_text(url: str, page=None) -> str:
     """Fetch a page through Chromium and return the visible document text."""
     if page is not None:
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        for _ in range(30):
+        for _ in range(15):
             pre = page.locator("pre")
             is_xml = pre.count() > 0
-            text = pre.first.inner_text(timeout=5000) if is_xml else page.locator("body").inner_text(timeout=5000)
+            text = pre.first.inner_text(timeout=1500) if is_xml else page.locator("body").inner_text(timeout=1500)
             # Do not HTML-unescape RSS XML: entities such as &#38; must remain escaped.
             raw_text = text.strip()
             normalized = raw_text if "<rss" in raw_text else html.unescape(raw_text)
@@ -219,15 +219,20 @@ def fetch_plain(filename: str, url: str) -> None:
 
 
 def main():
+    status_dir = OUT_DIR / ".status"
+    status_dir.mkdir(parents=True, exist_ok=True)
     for filename, url in FEEDS.items():
         print(f"Fetching {url}")
         try:
             if filename == "trivium_finance_regs.xml":
                 fetch_trivium(url, OUT_DIR / filename)
+                (status_dir / "trivium_finance_regs.txt").write_text("SUCCESS\n", encoding="utf-8")
             else:
                 fetch_plain(filename, url)
         except Exception as exc:
             print(f"WARN: failed to fetch {url}: {exc}")
+            if filename == "trivium_finance_regs.xml":
+                (status_dir / "trivium_finance_regs.txt").write_text(f"FAILED: {exc!r}\n\nPrevious feed retained if present.\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
