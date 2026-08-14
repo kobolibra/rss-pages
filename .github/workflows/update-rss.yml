@@ -107,34 +107,68 @@ jobs:
         run: |
           python -m playwright install --with-deps chromium || python -m playwright install chromium || echo "[blackstone] chromium install failed; will fall back to requests"
 
-      - name: Build Blackstone Insights feed (additive, non-fatal)
+      - name: Build experimental feeds (non-fatal, but observable)
         run: |
+          set +e
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           SCHEME=https
           BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          BLACKSTONE_MAX_ITEMS="${BLACKSTONE_MAX_ITEMS:-25}" \
-            python scripts/build_blackstone_insights_feed.py site "$BASE_URL" \
-            || echo "[blackstone] build failed; deploying without it (production feeds unaffected)"
+          mkdir -p site/.status
+          : > site/.status/experimental-feeds.txt
 
-      - name: Build KKR Insights feed (additive, non-fatal)
-        run: |
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          SCHEME=https
-          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          KKR_MAX_ITEMS="${KKR_MAX_ITEMS:-10}" \
-          KKR_MAX_RENDER_PER_RUN="${KKR_MAX_RENDER_PER_RUN:-6}" \
-            python scripts/build_kkr_insights_feed.py site "$BASE_URL" \
-            || echo "[kkr] build failed; deploying without it (production feeds unaffected)"
+          build_experimental() {
+            feed_name="$1"
+            label="$2"
+            shift 2
+            xml_path="site/${feed_name}.xml"
+            echo "::group::Build ${label} (${feed_name})"
+            "$@"
+            rc=$?
+            item_count=0
+            if [ -f "$xml_path" ]; then
+              item_count=$(grep -c '<item>' "$xml_path" || true)
+            fi
 
-      - name: Build experimental dbresearch_pro feed (additive, non-fatal)
-        run: |
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          SCHEME=https
-          BASE_URL="${SCHEME}://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          DBRESEARCH_PRO_MAX_PDFS="${DBRESEARCH_PRO_MAX_PDFS:-12}" \
-          DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS="${DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS:-10}" \
-            python scripts/build_dbresearch_pro_feed.py site "$BASE_URL" \
-            || echo "[pro] dbresearch_pro build failed; deploying without it (production feeds unaffected)"
+            if [ "$rc" -eq 0 ] && [ -f "$xml_path" ] && [ "$item_count" -gt 0 ]; then
+              status="SUCCESS"
+              echo "[${feed_name}] SUCCESS items=${item_count}"
+            else
+              status="FAILED"
+              echo "[${feed_name}] FAILED exit_code=${rc} items=${item_count}"
+              echo "[${feed_name}] attempting to restore the last published copy"
+              python scripts/restore_live_pages_feed.py "$BASE_URL" site "$feed_name" || true
+              if [ -f "$xml_path" ]; then
+                item_count=$(grep -c '<item>' "$xml_path" || true)
+              fi
+              echo "[${feed_name}] fallback_items=${item_count}"
+            fi
+
+            printf '%s\t%s\t%s\t%s\n' "$feed_name" "$status" "$item_count" "$(date -u +%FT%TZ)" >> site/.status/experimental-feeds.txt
+            {
+              echo "### ${label} (${feed_name})"
+              echo "- Status: **${status}**"
+              echo "- Items: **${item_count}**"
+              echo "- Time: $(date -u +%FT%TZ)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::endgroup::"
+          }
+
+          build_experimental blackstone_insights "Blackstone Insights" \
+            env BLACKSTONE_MAX_ITEMS="${BLACKSTONE_MAX_ITEMS:-25}" \
+            python scripts/build_blackstone_insights_feed.py site "$BASE_URL"
+
+          build_experimental kkr_insights "KKR Insights" \
+            env KKR_MAX_ITEMS="${KKR_MAX_ITEMS:-10}" \
+            KKR_MAX_RENDER_PER_RUN="${KKR_MAX_RENDER_PER_RUN:-6}" \
+            python scripts/build_kkr_insights_feed.py site "$BASE_URL"
+
+          build_experimental dbresearch_pro "DB Research Pro" \
+            env DBRESEARCH_PRO_MAX_PDFS="${DBRESEARCH_PRO_MAX_PDFS:-12}" \
+            DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS="${DBRESEARCH_PRO_FIRST_RUN_MAX_ITEMS:-10}" \
+            python scripts/build_dbresearch_pro_feed.py site "$BASE_URL"
+
+          echo "Experimental feed summary:"
+          cat site/.status/experimental-feeds.txt
 
       - name: Ensure original-source link on local item pages
         run: |
