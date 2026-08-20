@@ -319,36 +319,6 @@ class WebToRSS:
             print(f"[WebToRSS] saved: {p}")
         return xml
 
-    def _fetch_carlyle_dates(self, urls: List[str]) -> Dict[str, str]:
-        """Fetch exact Carlyle dates only for new items or one-time legacy repair."""
-        if not urls:
-            return {}
-        try:
-            from playwright.sync_api import sync_playwright
-        except Exception as exc:
-            print(f"[WebToRSS] Carlyle date lookup unavailable: {exc}")
-            return {}
-        date_re = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b")
-        result = {}
-        try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
-                page = browser.new_page()
-                for url in urls:
-                    try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                        text = page.locator("body").inner_text(timeout=15000)
-                        match = date_re.search(text)
-                        if match:
-                            result[url] = match.group(0)
-                            print(f"[WebToRSS] Carlyle date: {url} -> {match.group(0)}")
-                    except Exception as exc:
-                        print(f"[WebToRSS] Carlyle date lookup failed for {url}: {exc}")
-                browser.close()
-        except Exception as exc:
-            print(f"[WebToRSS] Carlyle browser unavailable: {exc}")
-        return result
-
     def _parse_desc_and_date(self, body: str) -> Tuple[str, Optional[str]]:
         """
         从条目后的正文片段中提取描述和日期。
@@ -1578,26 +1548,6 @@ class WebToRSS:
             identity: (item.findtext("pubDate") or "").strip()
             for identity, item in previous_items.items()
         }
-        legacy_carlyle_dates = (
-            parse_mode == "carlyle_insights"
-            and len(previous_dates) > 1
-            and len({value for value in previous_dates.values() if value}) <= 1
-        )
-        carlyle_date_urls: List[str] = []
-        if parse_mode == "carlyle_insights":
-            for groups, _start, _end, _full in matches:
-                try:
-                    candidate_link = item_cfg["link"].format(*groups)
-                except (IndexError, KeyError):
-                    candidate_link = groups[link_group - 1] if len(groups) >= link_group else ""
-                candidate_title = item_cfg["title"].format(*groups)
-                candidate_guid = self._md5(f"{candidate_title}{candidate_link}")
-                candidate_identity = "guid:" + candidate_guid
-                if legacy_carlyle_dates or candidate_identity not in previous_items:
-                    if candidate_link and candidate_link not in carlyle_date_urls:
-                        carlyle_date_urls.append(candidate_link)
-        carlyle_dates = self._fetch_carlyle_dates(carlyle_date_urls)
-
         seen = set()
         new_guids = set()
         count = 0
@@ -1655,26 +1605,26 @@ class WebToRSS:
             new_guids.add(guid)
             count += 1
 
-            # Existing entries keep the date already published in the live feed.
-            # This prevents a rebuild from changing every old article to "now".
-            if identity in previous_dates and previous_dates[identity] and not legacy_carlyle_dates:
-                pub_date = previous_dates[identity]
-            else:
-                exact_date = carlyle_dates.get(link) if parse_mode == "carlyle_insights" else None
-                date_str = exact_date or date_str
-                if date_str:
-                    pub_date = None
-                    for fmt in ("%B %d, %Y", "%b. %d, %Y", "%b %d, %Y", "%b. %Y", "%Y-%m-%d"):
-                        try:
-                            dt = datetime.strptime(date_str, fmt)
-                            pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
-                            break
-                        except ValueError:
-                            continue
-                    if pub_date is None:
-                        pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
-                else:
+            # Existing entries always keep their previously published date.
+            # In particular, Carlyle history must never be re-dated during a rebuild.
+            if identity in previous_dates:
+                pub_date = previous_dates[identity] or None
+            elif date_str:
+                pub_date = None
+                for fmt in ("%B %d, %Y", "%b. %d, %Y", "%b %d, %Y", "%b. %Y", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.strptime(date_str, fmt)
+                        pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                        break
+                    except ValueError:
+                        continue
+                if pub_date is None:
                     pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+            else:
+                # Keep the historical-date rule strict for Carlyle: if a new item
+                # has no date in the current listing, leave pubDate absent rather
+                # than claiming that it was published at build time.
+                pub_date = None if parse_mode == "carlyle_insights" else datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
 
             builder.add_item(
                 title=title_raw,
