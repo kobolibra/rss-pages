@@ -20,6 +20,7 @@ Usage: python fix_citadel_pages.py <site_dir> [base_url]
 """
 import hashlib
 import html as _html
+import os
 import re
 import sys
 import time
@@ -77,8 +78,13 @@ def _download_images_via_browser(
     if not image_urls:
         return mapping
 
+    # Citadel's Cloudflare protection accepts a full Chromium session but
+    # blocks headless fetches even with a browser User-Agent. GitHub Actions
+    # runs this path under xvfb-run when CITADEL_HEADFUL=1 is configured.
+    headful = os.getenv("CITADEL_HEADFUL", "").strip().lower() in {"1", "true", "yes"}
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=not headful)
         ctx = browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
         )
@@ -86,7 +92,8 @@ def _download_images_via_browser(
 
         try:
             # Step 1: navigate to the article page to establish a
-            # Cloudflare-cleared browser session.
+            # Cloudflare-cleared browser session. A headful Chromium session
+            # is used in Actions because Citadel rejects headless image fetches.
             page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
             # Wait for Cloudflare JS Challenge to resolve (max 10 seconds).
             for _ in range(20):

@@ -185,9 +185,9 @@ jobs:
           python scripts/fix_kkr_pages.py site "$BASE_URL"
           # GSAM: rehost am.gs.com CDN images to our Pages domain.
           python scripts/fix_gsam_pages.py site "$BASE_URL"
-          # Citadel: rehost citadelsecurities.com images via Playwright
-          # (site is behind Cloudflare JS Challenge — requires real browser).
-          python scripts/fix_citadel_pages.py site "$BASE_URL"
+          # Citadel: rehost citadelsecurities.com images through a full Chromium
+          # session under xvfb. Citadel blocks headless requests even with a browser UA.
+          CITADEL_HEADFUL=1 xvfb-run -a python scripts/fix_citadel_pages.py site "$BASE_URL"
 
       - name: Add index page
         run: |
